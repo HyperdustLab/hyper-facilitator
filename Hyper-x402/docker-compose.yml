@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  facilitator:
+    image: ghcr.io/x402-rs/x402-rs:latest
+    container_name: facilitator
+    restart: unless-stopped
+    ports:
+      - "4020:4020"
+    environment:
+      - FAC_BIND=${FAC_BIND}
+      - FAC_NETWORKS=${FAC_NETWORKS}
+      - FAC_RPC_BASE_MAINNET=${FAC_RPC_BASE_MAINNET}
+      - FAC_SERVER_WALLET_KEY=${FAC_SERVER_WALLET_KEY}
+      - RUST_LOG=${RUST_LOG}
+
+  seller:
+    build: ./seller-demo-node
+    container_name: seller
+    restart: unless-stopped
+    environment:
+      - FACILITATOR_URL=${FACILITATOR_URL}
+      - MERCHANT_ADDR=${MERCHANT_ADDR}
+      - SCHEME=${SCHEME}
+      - NETWORK=${NETWORK}
+      - ASSET=${ASSET}
+      - AMOUNT=${AMOUNT}
+    ports:
+      - "4080:4080"
+    depends_on:
+      - facilitator
+
