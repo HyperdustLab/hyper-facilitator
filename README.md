@@ -1,4 +1,4 @@
-# x402 payments protocol
+# Hyper Facilitator
 
 ## Hyper Facilitator Roadmap
 
