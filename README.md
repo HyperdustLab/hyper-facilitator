@@ -36,6 +36,14 @@ Want to add your project to the ecosystem? See our [demo site README](https://gi
 
 **Roadmap:** see [ROADMAP.md](https://github.com/coinbase/x402/blob/main/ROADMAP.md)
 
+## Hyper Facilitator Roadmap
+
+- Goal: Deliver a facilitator that supports $HYPT as a payment asset.
+- Purpose: Enable autonomous economic activity for MOSS AI agents across MOSS Office and gaming experiences.
+- MVP: Testnet support for $HYPT with x402 `exact` scheme, end‑to‑end verify/settle, and a minimal seller demo for quick integration.
+- Production: Mainnet readiness, hardened auth and rate‑limiting, monitoring/alerting, and operational runbooks.
+- Ecosystem: Developer docs, SDK examples, and CI/CD templates to streamline deployment in real products.
+
 ## Terms:
 
 - `resource`: Something on the internet. This could be a webpage, file server, RPC service, API, any resource on the internet that accepts HTTP / HTTPS requests.
