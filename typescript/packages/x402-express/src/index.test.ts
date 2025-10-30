@@ -159,7 +159,7 @@ describe("paymentMiddleware()", () => {
     mockReq = {
       path: "/test",
       method: "GET",
-      headers: {},
+      headers: { host: "app.test" },
       header: function (name: string) {
         return this.headers[name.toLowerCase()];
       },
@@ -212,7 +212,7 @@ describe("paymentMiddleware()", () => {
   });
 
   it("should return 402 with payment requirements when no payment header is present", async () => {
-    mockReq.headers = {};
+    mockReq.headers = { host: "app.test" };
     await middleware(mockReq as Request, mockRes as Response, mockNext);
 
     expect(mockRes.status).toHaveBeenCalledWith(402);
@@ -225,8 +225,54 @@ describe("paymentMiddleware()", () => {
     );
   });
 
+  it("should prefer proxy headers when building resource URLs", async () => {
+    const routeConfigWithoutResource: PaymentMiddlewareConfig = { ...middlewareConfig };
+    delete routeConfigWithoutResource.resource;
+
+    const forwardedRoutes: RoutesConfig = {
+      "/forwarded": {
+        price: "$0.001",
+        network: "base-sepolia",
+        config: routeConfigWithoutResource,
+      },
+    };
+
+    vi.mocked(findMatchingRoute).mockImplementationOnce((_, path, method) => {
+      if (path === "/forwarded" && method === "GET") {
+        return {
+          pattern: /^\/forwarded$/,
+          verb: "GET",
+          config: {
+            price: "$0.001",
+            network: "base-sepolia",
+            config: routeConfigWithoutResource,
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const forwardedMiddleware = paymentMiddleware(payTo, forwardedRoutes, facilitatorConfig);
+
+    mockReq.path = "/forwarded";
+    (mockReq as Partial<Request>).originalUrl = "/forwarded";
+    mockReq.headers = {
+      host: "app.test",
+      accept: "application/json",
+      "x-original-uri": "/proxy/resource?foo=bar",
+      "x-forwarded-host": "api.example.com",
+      "x-forwarded-proto": "https",
+    };
+
+    await forwardedMiddleware(mockReq as Request, mockRes as Response, mockNext);
+
+    const payload = (mockRes.json as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(payload?.accepts?.[0]?.resource).toBe("https://api.example.com/proxy/resource?foo=bar");
+  });
+
   it("should return HTML paywall for browser requests", async () => {
     mockReq.headers = {
+      host: "app.test",
       accept: "text/html",
       "user-agent": "Mozilla/5.0",
     };
@@ -238,6 +284,7 @@ describe("paymentMiddleware()", () => {
 
   it("should verify payment and proceed if valid", async () => {
     mockReq.headers = {
+      host: "app.test",
       "x-payment": encodedValidPayment,
     };
     (mockVerify as ReturnType<typeof vi.fn>).mockResolvedValue({ isValid: true });
@@ -251,6 +298,7 @@ describe("paymentMiddleware()", () => {
 
   it("should return 402 if payment verification fails", async () => {
     mockReq.headers = {
+      host: "app.test",
       "x-payment": "invalid-payment-header",
     };
     (exact.evm.decodePayment as ReturnType<typeof vi.fn>).mockImplementation(() => {
@@ -291,6 +339,7 @@ describe("paymentMiddleware()", () => {
 
   it("should return 402 if payment verification throws an error", async () => {
     mockReq.headers = {
+      host: "app.test",
       "x-payment": encodedValidPayment,
     };
     (mockVerify as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Unexpected error"));
@@ -324,6 +373,7 @@ describe("paymentMiddleware()", () => {
 
   it("should handle settlement after response", async () => {
     mockReq.headers = {
+      host: "app.test",
       "x-payment": encodedValidPayment,
     };
     (mockVerify as ReturnType<typeof vi.fn>).mockResolvedValue({ isValid: true });
@@ -350,6 +400,7 @@ describe("paymentMiddleware()", () => {
 
   it("should handle settle throwing an error before response is sent", async () => {
     mockReq.headers = {
+      host: "app.test",
       "x-payment": encodedValidPayment,
     };
     (mockVerify as ReturnType<typeof vi.fn>).mockResolvedValue({ isValid: true });
@@ -384,6 +435,7 @@ describe("paymentMiddleware()", () => {
 
   it("should handle unsuccessful settle before resource response is sent", async () => {
     mockReq.headers = {
+      host: "app.test",
       "x-payment": encodedValidPayment,
     };
     (mockVerify as ReturnType<typeof vi.fn>).mockResolvedValue({ isValid: true });
@@ -512,7 +564,7 @@ describe("paymentMiddleware()", () => {
       facilitatorConfig,
     );
 
-    mockReq.headers = {};
+    mockReq.headers = { host: "app.test" };
     await middleware(mockReq as Request, mockRes as Response, mockNext);
 
     expect(mockRes.status).toHaveBeenCalledWith(402);
@@ -572,7 +624,7 @@ describe("paymentMiddleware()", () => {
       facilitatorConfig,
     );
 
-    mockReq.headers = {};
+    mockReq.headers = { host: "app.test" };
     await middleware(mockReq as Request, mockRes as Response, mockNext);
 
     expect(mockRes.status).toHaveBeenCalledWith(402);
@@ -612,6 +664,7 @@ describe("paymentMiddleware()", () => {
       );
 
       mockReq.headers = {
+        host: "app.test",
         accept: "text/html",
         "user-agent": "Mozilla/5.0",
       };
@@ -642,6 +695,7 @@ describe("paymentMiddleware()", () => {
       );
 
       mockReq.headers = {
+        host: "app.test",
         accept: "text/html",
         "user-agent": "Mozilla/5.0",
       };
@@ -670,6 +724,7 @@ describe("paymentMiddleware()", () => {
       );
 
       mockReq.headers = {
+        host: "app.test",
         accept: "text/html",
         "user-agent": "Mozilla/5.0",
       };
@@ -690,6 +745,7 @@ describe("paymentMiddleware()", () => {
       const middlewareWithoutPaywall = paymentMiddleware(payTo, routesConfig, facilitatorConfig);
 
       mockReq.headers = {
+        host: "app.test",
         accept: "text/html",
         "user-agent": "Mozilla/5.0",
       };

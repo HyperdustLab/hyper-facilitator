@@ -9,6 +9,7 @@ import {
   findMatchingRoute,
   processPriceToAtomicAmount,
   toJsonSafe,
+  resolveResourceUrl,
 } from "x402/shared";
 import { getPaywallHtml } from "x402/paywall";
 import {
@@ -132,8 +133,22 @@ export function paymentMiddleware(
     }
     const { maxAmountRequired, asset } = atomicAmountForAsset;
 
-    const resourceUrl =
-      resource || (`${request.nextUrl.protocol}//${request.nextUrl.host}${pathname}` as Resource);
+    const resourceHeaders: Record<string, string | undefined> = {
+      "x-original-uri": request.headers.get("x-original-uri") ?? undefined,
+      "x-rewrite-url": request.headers.get("x-rewrite-url") ?? undefined,
+      "x-forwarded-uri": request.headers.get("x-forwarded-uri") ?? undefined,
+      "x-forwarded-host": request.headers.get("x-forwarded-host") ?? undefined,
+      "x-forwarded-proto": request.headers.get("x-forwarded-proto") ?? undefined,
+      "x-forwarded-port": request.headers.get("x-forwarded-port") ?? undefined,
+    };
+
+    const resourceUrl = resolveResourceUrl({
+      resource,
+      protocol: request.nextUrl.protocol,
+      host: request.nextUrl.host,
+      path: `${pathname}${request.nextUrl.search}${request.nextUrl.hash}`,
+      headers: resourceHeaders,
+    });
 
     let paymentRequirements: PaymentRequirements[] = [];
 
