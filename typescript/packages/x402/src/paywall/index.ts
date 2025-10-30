@@ -19,14 +19,29 @@ interface PaywallOptions {
  * @param str - The string to escape
  * @returns The escaped string
  */
+const ESCAPE_LOOKUP: Record<string, string> = {
+  "\\": "\\\\",
+  '"': '\\"',
+  "'": "\\'",
+  "`": "\\u0060",
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+  "\u0008": "\\b",
+  "\u000c": "\\f",
+  "\u2028": "\\u2028",
+  "\u2029": "\\u2029",
+  "<": "\\u003C",
+  ">": "\\u003E",
+  "&": "\\u0026",
+  "=": "\\u003D",
+  "/": "\\u002F",
+};
+
+const ESCAPE_REGEX = /[\\'"`\u0008\u000c\n\r\t\u2028\u2029<>&=\/]/g;
+
 function escapeString(str: string): string {
-  return str
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/'/g, "\\'")
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
+  return str.replace(ESCAPE_REGEX, char => ESCAPE_LOOKUP[char] ?? char);
 }
 
 /**
