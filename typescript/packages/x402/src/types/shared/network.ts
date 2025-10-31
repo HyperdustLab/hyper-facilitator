@@ -49,9 +49,22 @@ export const SvmNetworkToChainId = new Map<Network, number>([
   ["solana", 101],
 ]);
 
-export const ChainIdToNetwork = Object.fromEntries(
-  [...SupportedEVMNetworks, ...SupportedSVMNetworks].map(network => [
-    EvmNetworkToChainId.get(network),
-    network,
-  ]),
-) as Record<number, Network>;
+const chainIdEntries: Array<[number, Network]> = [];
+
+for (const network of SupportedEVMNetworks) {
+  const chainId = EvmNetworkToChainId.get(network);
+  if (chainId === undefined) {
+    throw new Error(`Missing chain id mapping for EVM network: ${network}`);
+  }
+  chainIdEntries.push([chainId, network]);
+}
+
+for (const network of SupportedSVMNetworks) {
+  const chainId = SvmNetworkToChainId.get(network);
+  if (chainId === undefined) {
+    throw new Error(`Missing chain id mapping for SVM network: ${network}`);
+  }
+  chainIdEntries.push([chainId, network]);
+}
+
+export const ChainIdToNetwork = Object.fromEntries(chainIdEntries) as Record<number, Network>;
