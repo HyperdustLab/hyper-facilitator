@@ -58,3 +58,19 @@ For implementation examples, we recommend reviewing our official client packages
 - [x402-fetch implementation](https://github.com/coinbase/x402/blob/main/typescript/packages/x402-fetch/src/index.ts)
 - [x402-axios implementation](https://github.com/coinbase/x402/blob/main/typescript/packages/x402-axios/src/index.ts)
 
+## Utilities
+
+The package includes small helpers for safely handling base64 payloads, which are useful when working with `X-PAYMENT-RESPONSE` headers or facilitator responses.
+
+```ts
+import { safeBase64DecodeJson } from "x402/shared/base64";
+
+const headerValue = "eyJzdWNjZXNzIjp0cnVlfQ=="; // example payload
+const decoded = safeBase64DecodeJson<{ success: boolean }>(headerValue);
+
+if (decoded.success) {
+  // proceed with the successful settlement
+}
+```
+
+`safeBase64DecodeJson` validates the input, removes whitespace, and throws if the decoded payload is not valid JSON.
