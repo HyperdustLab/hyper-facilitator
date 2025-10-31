@@ -4,6 +4,7 @@ import {
   findMatchingRoute,
   getDefaultAsset,
   processPriceToAtomicAmount,
+  resolveResourceUrl,
 } from "x402/shared";
 import { RoutesConfig } from "./middleware";
 import { Network } from "./network";
@@ -442,5 +443,63 @@ describe("processPriceToAtomicAmount", () => {
     expect(result).toEqual({
       error: expect.stringContaining("Number must be greater than or equal to 0.0001"),
     });
+  });
+});
+
+describe("resolveResourceUrl", () => {
+  it("should return explicit resource when provided", () => {
+    const resource = resolveResourceUrl({
+      resource: "https://api.example.com/resource",
+      protocol: "http",
+      host: "internal.local",
+      path: "/internal",
+      headers: {},
+    });
+
+    expect(resource).toBe("https://api.example.com/resource");
+  });
+
+  it("should build URL from forwarded headers", () => {
+    const resource = resolveResourceUrl({
+      protocol: "http",
+      host: "internal.local",
+      path: "/internal/path",
+      headers: {
+        "x-original-uri": "/external/items?foo=bar",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "payments.example.com",
+      },
+    });
+
+    expect(resource).toBe("https://payments.example.com/external/items?foo=bar");
+  });
+
+  it("should normalize forwarded URIs without leading slash and include port", () => {
+    const resource = resolveResourceUrl({
+      protocol: "http",
+      host: "internal.local",
+      path: "/fallback",
+      headers: {
+        "x-original-uri": "data?id=1",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "edge.example.org",
+        "x-forwarded-port": "8443",
+      },
+    });
+
+    expect(resource).toBe("https://edge.example.org:8443/data?id=1");
+  });
+
+  it("should fallback to request path when forwarded URI is invalid", () => {
+    const resource = resolveResourceUrl({
+      protocol: "https",
+      host: "service.internal",
+      path: "/fallback/path",
+      headers: {
+        "x-original-uri": "http://%",
+      },
+    });
+
+    expect(resource).toBe("https://service.internal/fallback/path");
   });
 });

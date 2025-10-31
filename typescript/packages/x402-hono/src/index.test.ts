@@ -234,6 +234,53 @@ describe("paymentMiddleware()", () => {
     );
   });
 
+  it("should honor X-Original-URI when building resource URL", async () => {
+    const configWithoutResource: PaymentMiddlewareConfig = { ...middlewareConfig };
+    delete configWithoutResource.resource;
+
+    const forwardedRoutes: RoutesConfig = {
+      "/proxy": {
+        price: "$0.001",
+        network: "base-sepolia",
+        config: configWithoutResource,
+      },
+    };
+
+    (findMatchingRoute as ReturnType<typeof vi.fn>).mockImplementationOnce((_, path, method) => {
+      if (path === "/proxy" && method === "GET") {
+        return {
+          verb: "GET",
+          pattern: /^\/proxy$/,
+          config: {
+            price: "$0.001",
+            network: "base-sepolia",
+            config: configWithoutResource,
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const forwardedMiddleware = paymentMiddleware(payTo, forwardedRoutes, facilitatorConfig);
+
+    mockContext.req.url = "http://internal.local/proxy";
+    mockContext.req.path = "/proxy";
+    (mockContext.req.header as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+        "X-Original-URI": "/upstream/data?foo=bar",
+        "X-Forwarded-Host": "api.hono.dev",
+        "X-Forwarded-Proto": "https",
+      };
+      return headers[name] ?? undefined;
+    });
+
+    await forwardedMiddleware(mockContext, mockNext);
+
+    const payload = (mockContext.json as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0];
+    expect(payload?.accepts?.[0]?.resource).toBe("https://api.hono.dev/upstream/data?foo=bar");
+  });
+
   it("should return 402 with feePayer for solana-devnet when no payment header is present", async () => {
     const solanaRoutesConfig: RoutesConfig = {
       "/weather": {

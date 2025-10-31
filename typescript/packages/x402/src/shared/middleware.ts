@@ -10,7 +10,7 @@ import {
   PaymentPayload,
   SPLTokenAmount,
 } from "../types";
-import { RoutesConfig } from "../types";
+import { Resource, RoutesConfig } from "../types";
 import { safeBase64Decode } from "./base64";
 import { getUsdcChainConfigForChain } from "./evm";
 import { getNetworkId } from "./network";
@@ -135,6 +135,106 @@ export function getDefaultAsset(network: Network) {
       version: "2",
     },
   };
+}
+
+const FORWARDED_URI_HEADER_CANDIDATES = ["x-original-uri", "x-rewrite-url", "x-forwarded-uri"] as const;
+
+function pickFirstHeader(
+  headers: Record<string, string | undefined>,
+  candidates: readonly string[],
+): string | undefined {
+  for (const candidate of candidates) {
+    const value = headers[candidate];
+    if (value) {
+      return value.split(",")[0]?.trim();
+    }
+  }
+  return undefined;
+}
+
+function sanitizeRelativePath(candidate: string | undefined, fallbackPath: string): string {
+  if (!candidate) {
+    return fallbackPath;
+  }
+
+  const normalized = candidate.replace(/[\r\n]/g, "").trim();
+  if (!normalized) {
+    return fallbackPath;
+  }
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(normalized)) {
+    try {
+      const url = new URL(normalized);
+      return `${url.pathname || "/"}${url.search}${url.hash}`;
+    } catch {
+      return fallbackPath;
+    }
+  }
+
+  if (!normalized.startsWith("/")) {
+    return `/${normalized.replace(/^\/+/, "")}`;
+  }
+
+  return normalized;
+}
+
+function normalizeHeaderValue(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return value.split(",")[0]?.trim();
+}
+
+/**
+ * Resolves the resource URL for a request by preferring proxy-provided headers.
+ *
+ * @param options.resource - Explicit resource override from route config
+ * @param options.protocol - The request protocol (e.g. "http" or "https")
+ * @param options.host - The host serving the request
+ * @param options.path - The fallback path (usually request path + query)
+ * @param options.headers - Request headers map (header names should be lowercased)
+ * @returns Fully qualified resource URL
+ */
+export function resolveResourceUrl({
+  resource,
+  protocol,
+  host,
+  path,
+  headers,
+}: {
+  resource?: Resource;
+  protocol: string;
+  host?: string;
+  path: string;
+  headers: Record<string, string | undefined>;
+}): Resource {
+  if (resource) {
+    return resource;
+  }
+
+  const forwardedProto = normalizeHeaderValue(headers["x-forwarded-proto"]);
+  const forwardedHost = normalizeHeaderValue(headers["x-forwarded-host"]);
+  const forwardedPort = normalizeHeaderValue(headers["x-forwarded-port"]);
+  const candidateUri = pickFirstHeader(headers, FORWARDED_URI_HEADER_CANDIDATES);
+
+  const effectiveProtocol = forwardedProto ?? protocol;
+
+  let effectiveHost = forwardedHost ?? host ?? "";
+  if (forwardedPort && effectiveHost && !effectiveHost.includes(":")) {
+    effectiveHost = `${effectiveHost}:${forwardedPort}`;
+  }
+
+  if (!effectiveHost) {
+    throw new Error("Unable to resolve host for resource URL");
+  }
+
+  const resolvedPath = sanitizeRelativePath(candidateUri, path);
+  const baseProtocol = effectiveProtocol.endsWith(":")
+    ? effectiveProtocol.slice(0, -1)
+    : effectiveProtocol;
+
+  return `${baseProtocol}://${effectiveHost}${resolvedPath}` as Resource;
 }
 
 /**

@@ -139,6 +139,8 @@ describe("paymentMiddleware()", () => {
         pathname: "/protected/test",
         protocol: "https:",
         host: "example.com",
+        search: "",
+        hash: "",
       },
       headers: new Headers(),
       method: "GET",
@@ -366,6 +368,61 @@ describe("paymentMiddleware()", () => {
         version: "2",
       },
     });
+  });
+
+  it("should build resource URL from forwarded headers", async () => {
+    const configWithoutResource: PaymentMiddlewareConfig = { ...middlewareConfig };
+    delete configWithoutResource.resource;
+
+    const forwardedMiddleware = paymentMiddleware(
+      payTo,
+      {
+        "/forwarded/*": {
+          price: 1.0,
+          network: "base-sepolia",
+          config: configWithoutResource,
+        },
+      },
+      facilitatorConfig,
+    );
+
+    (findMatchingRoute as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (routePatterns, path, method) => {
+        if (path === "/forwarded/data" && method === "GET") {
+          return {
+            pattern: /^\/forwarded\/data$/,
+            verb: "GET",
+            config: {
+              price: 1.0,
+              network: "base-sepolia",
+              config: configWithoutResource,
+            },
+          };
+        }
+        return undefined;
+      },
+    );
+
+    const request = {
+      ...mockRequest,
+      headers: new Headers({
+        Accept: "application/json",
+        "X-Original-URI": "/proxy/path?foo=bar",
+        "X-Forwarded-Host": "next.example.dev",
+        "X-Forwarded-Proto": "https",
+      }),
+    } as NextRequest;
+
+    request.nextUrl.pathname = "/forwarded/data";
+    request.nextUrl.host = "internal.example";
+    request.nextUrl.protocol = "https:";
+    request.nextUrl.search = "";
+    (request.nextUrl as { hash: string }).hash = "";
+
+    const response = await forwardedMiddleware(request);
+    expect(response.status).toBe(402);
+    const json = (await response.json()) as { accepts: Array<{ resource: string }> };
+    expect(json.accepts[0].resource).toBe("https://next.example.dev/proxy/path?foo=bar");
   });
 
   it("should return HTML paywall for browser requests", async () => {
