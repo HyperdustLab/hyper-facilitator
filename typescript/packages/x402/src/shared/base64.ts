@@ -20,8 +20,13 @@ export function safeBase64Encode(data: string): string {
  * @returns The decoded string in UTF-8 format
  */
 export function safeBase64Decode(data: string): string {
-  if (typeof globalThis !== "undefined" && typeof globalThis.atob === "function") {
-    return globalThis.atob(data);
+  const sanitized = data.replace(/\s+/g, "");
+  if (!Base64EncodedRegex.test(sanitized) || sanitized.length % 4 !== 0) {
+    throw new Error("Invalid base64 string");
   }
-  return Buffer.from(data, "base64").toString("utf-8");
+
+  if (typeof globalThis !== "undefined" && typeof globalThis.atob === "function") {
+    return globalThis.atob(sanitized);
+  }
+  return Buffer.from(sanitized, "base64").toString("utf-8");
 }
