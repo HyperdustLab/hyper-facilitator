@@ -42,7 +42,7 @@ The x402 ecosystem is growing! Check out our [ecosystem page](https://x402.org/e
 
 Want to add your project to the ecosystem? See our [demo site README](https://github.com/coinbase/x402/tree/main/typescript/site#adding-your-project-to-the-ecosystem) for detailed instructions on how to submit your project.
 
-**Roadmap:** see [ROADMAP.md](https://github.com/coinbase/x402/blob/main/ROADMAP.md)
+**Roadmap:** see [ROADMAP.md](ROADMAP.md)
 
 
 
