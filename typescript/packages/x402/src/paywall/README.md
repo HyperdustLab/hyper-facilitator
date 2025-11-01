@@ -22,6 +22,10 @@ export const middleware = paymentMiddleware(
 
 **Enhanced RPC** (optional): Add `cdpClientKey` to use Coinbase's hosted RPC infrastructure for improved performance.
 
+## Security Notes
+
+Dynamic values supplied via middleware configuration (for example `currentUrl`, `appName`, or `sessionTokenEndpoint`) are escaped before being embedded into the paywall's `<script>` tag. The escaping now neutralizes characters such as `<`, `>`, `/`, backticks, and Unicode line separators to prevent accidental markup injection when those fields are populated from user input.
+
 ## Configuration Options
 
 | Option | Description |
