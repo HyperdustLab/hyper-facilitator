@@ -195,7 +195,8 @@ export function paymentMiddleware(
     const payment = req.header("X-PAYMENT");
     const userAgent = req.header("User-Agent") || "";
     const acceptHeader = req.header("Accept") || "";
-    const isWebBrowser = acceptHeader.includes("text/html") && userAgent.includes("Mozilla");
+    const prefersJson = acceptHeader.includes("application/json");
+    const isWebBrowser = acceptHeader.includes("text/html") && userAgent.includes("Mozilla") && !prefersJson;
 
     if (!payment) {
       // TODO handle paywall html for solana

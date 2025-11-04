@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, http, publicActions } from "viem";
+import { createPublicClient, createWalletClient, http, publicActions, custom } from "viem";
 import type {
   Chain,
   Transport,
@@ -9,6 +9,7 @@ import type {
   WalletActions,
   PublicClient,
   LocalAccount,
+  EIP1193Provider,
 } from "viem";
 import {
   baseSepolia,
@@ -108,6 +109,42 @@ export function createSigner(network: string, privateKey: Hex): SignerWallet<Cha
     chain,
     transport: http(),
     account: privateKeyToAccount(privateKey),
+  }).extend(publicActions);
+}
+
+/**
+ * Creates a wallet client configured for the specified chain with a browser wallet provider
+ *
+ * @param network - The network to connect to
+ * @param provider - The EIP-1193 provider (e.g., window.ethereum from MetaMask)
+ * @param account - The account address to use (optional, will request accounts if not provided)
+ * @returns A promise that resolves to a wallet client instance connected to the specified chain with the browser wallet
+ */
+export async function createSignerFromProvider(
+  network: string,
+  provider: EIP1193Provider,
+  account?: Hex,
+): Promise<SignerWallet<Chain>> {
+  const chain = getChainFromNetwork(network);
+
+  // If no account is provided, request accounts from the provider
+  let accountAddress = account;
+  if (!accountAddress) {
+    const accounts = (await provider.request({
+      method: "eth_requestAccounts",
+    })) as Hex[];
+
+    if (accounts.length === 0) {
+      throw new Error("No accounts found in browser wallet");
+    }
+
+    accountAddress = accounts[0];
+  }
+
+  return createWalletClient({
+    chain,
+    transport: custom(provider),
+    account: accountAddress,
   }).extend(publicActions);
 }
 

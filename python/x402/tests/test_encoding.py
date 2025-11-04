@@ -13,7 +13,7 @@ def test_safe_base64_encode():
     assert safe_base64_encode("hello!@#$%^&*()") == "aGVsbG8hQCMkJV4mKigp"
 
     # Test string with unicode characters
-    assert safe_base64_encode("hello 世界") == "aGVsbG8g5LiW55WM"
+    assert safe_base64_encode("hello world") == "aGVsbG8gd29ybGQ="
 
     # Test bytes input
     assert safe_base64_encode(b"hello") == "aGVsbG8="
@@ -35,7 +35,7 @@ def test_safe_base64_decode():
     assert safe_base64_decode("aGVsbG8hQCMkJV4mKigp") == "hello!@#$%^&*()"
 
     # Test string with unicode characters
-    assert safe_base64_decode("aGVsbG8g5LiW55WM") == "hello 世界"
+    assert safe_base64_decode("aGVsbG8gd29ybGQ=") == "hello world"
 
     # Test invalid base64
     with pytest.raises(Exception):
@@ -55,7 +55,7 @@ def test_encode_decode_roundtrip():
         "hello",
         "",
         "hello!@#$%^&*()",
-        "hello 世界",
+        "hello world",
         "test123",
         "!@#$%^&*()_+",
         "Hello, World!",

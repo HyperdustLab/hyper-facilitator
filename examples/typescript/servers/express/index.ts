@@ -50,7 +50,7 @@ app.use(
 );
 
 app.get("/weather", (req, res) => {
-  res.send({
+  res.json({
     report: {
       weather: "sunny",
       temperature: 70,
@@ -59,7 +59,7 @@ app.get("/weather", (req, res) => {
 });
 
 app.get("/premium/content", (req, res) => {
-  res.send({
+  res.json({
     content: "This is premium content",
   });
 });

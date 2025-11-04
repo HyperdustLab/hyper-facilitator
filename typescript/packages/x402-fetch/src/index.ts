@@ -121,6 +121,6 @@ export function wrapFetchWithPayment(
 }
 
 export { decodeXPaymentResponse } from "x402/shared";
-export { createSigner, type Signer, type MultiNetworkSigner, type X402Config } from "x402/types";
+export { createSigner, createSignerFromProvider, type Signer, type MultiNetworkSigner, type X402Config } from "x402/types";
 export { type PaymentRequirementsSelector } from "x402/client";
-export type { Hex } from "viem";
+export type { Hex, EIP1193Provider } from "viem";

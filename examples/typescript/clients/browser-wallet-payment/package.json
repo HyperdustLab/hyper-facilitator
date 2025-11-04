@@ -1,0 +1,26 @@
+{
+  "name": "x402-browser-wallet-payment",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Vue3 frontend example: x402 payment using browser wallets",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.21",
+    "axios": "^1.6.7",
+    "x402": "workspace:*",
+    "x402-axios": "workspace:*",
+    "viem": "^2.21.45"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "^5.4.3",
+    "vue-tsc": "^1.8.27",
+    "vite": "^5.1.6",
+    "@types/node": "^20.11.0"
+  }
+}
+

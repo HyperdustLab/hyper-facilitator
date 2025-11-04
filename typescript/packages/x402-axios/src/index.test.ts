@@ -139,10 +139,10 @@ describe("withPaymentInterceptor()", () => {
     );
     expect(mockAxiosClient.request).toHaveBeenCalledWith({
       ...error.config,
-      headers: new AxiosHeaders({
-        "X-PAYMENT": paymentHeader,
-        "Access-Control-Expose-Headers": "X-PAYMENT-RESPONSE",
-      }),
+        headers: new AxiosHeaders({
+          "X-PAYMENT": paymentHeader,
+          // Note: Access-Control-Expose-Headers is a response header set by the server, should not be sent in request headers
+        }),
       __is402Retry: true,
     });
   });

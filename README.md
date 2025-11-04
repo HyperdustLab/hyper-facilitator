@@ -44,8 +44,6 @@ Want to add your project to the ecosystem? See our [demo site README](https://gi
 
 **Roadmap:** see [ROADMAP.md](ROADMAP.md)
 
-
-
 ## Terms:
 
 - `resource`: Something on the internet. This could be a webpage, file server, RPC service, API, any resource on the internet that accepts HTTP / HTTPS requests.
