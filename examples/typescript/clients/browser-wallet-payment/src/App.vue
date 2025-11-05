@@ -65,77 +65,68 @@
         </div>
       </section>
 
-      <!-- SSE section -->
-      <section class="sse-section">
-        <h2>3. SSE Stream Request</h2>
-        <div class="sse-controls">
-          <div class="sse-url-input">
-            <label for="sse-url">SSE URL:</label>
+      <!-- POST Request section -->
+      <section class="post-section">
+        <h2>3. POST Request</h2>
+        <div class="post-controls">
+          <div class="post-url-input">
+            <label for="post-url">URL:</label>
             <input
-              id="sse-url"
-              v-model="sseUrl"
+              id="post-url"
+              v-model="postUrl"
               type="text"
               placeholder="http://localhost:4021/generate"
               class="input-field"
-              :disabled="!isConnected || isConnectingSSE || isConnectedSSE"
+              :disabled="!isConnected || isRequestingPost"
             />
           </div>
-          <div class="sse-params-input">
-            <label for="sse-params">Parameters (JSON):</label>
+          <div class="post-body-input">
+            <label for="post-body">Body (JSON):</label>
             <textarea
-              id="sse-params"
-              v-model="sseParams"
+              id="post-body"
+              v-model="postBody"
               placeholder='{"prompt": "Hello"}'
               class="textarea-field"
-              :disabled="!isConnected || isConnectingSSE || isConnectedSSE"
+              :disabled="!isConnected || isRequestingPost"
               rows="4"
             ></textarea>
           </div>
-          <div class="sse-buttons">
+          <div class="post-buttons">
             <button
-              @click="handleConnectSSE"
-              :disabled="
-                !isConnected || !sseUrl || isConnectingSSE || isConnectedSSE
-              "
+              @click="handlePostRequest"
+              :disabled="!isConnected || !postUrl || isRequestingPost"
               class="btn btn-primary"
             >
-              {{
-                isConnectingSSE
-                  ? "Connecting..."
-                  : isConnectedSSE
-                  ? "Connected"
-                  : "Connect SSE"
-              }}
+              {{ isRequestingPost ? "提交中..." : "提交请求" }}
             </button>
             <button
-              @click="handleDisconnectSSE"
-              :disabled="!isConnectedSSE && !isConnectingSSE"
+              @click="clearPostResponse"
+              :disabled="!postResponse"
               class="btn btn-secondary"
             >
-              Disconnect
-            </button>
-            <button @click="clearSSEMessages" class="btn btn-secondary">
-              Clear Messages
+              清除结果
             </button>
           </div>
         </div>
 
-        <div v-if="sseError" class="error-message">{{ sseError }}</div>
+        <div v-if="postError" class="error-message">{{ postError }}</div>
 
-        <div class="sse-messages">
-          <h3>SSE Messages:</h3>
-          <div class="messages-container">
-            <div
-              v-for="(msg, index) in sseMessages"
-              :key="index"
-              :class="['message-item', `message-${msg.type}`]"
-            >
-              <span class="message-time">{{ msg.timestamp }}</span>
-              <span class="message-type">[{{ msg.type.toUpperCase() }}]</span>
-              <span class="message-data">{{ msg.data }}</span>
+        <div v-if="postResponse" class="post-response">
+          <h3>响应结果:</h3>
+          <div class="response-content">
+            <div class="response-status">
+              <span class="status-label">状态:</span>
+              <span
+                :class="[
+                  'status-value',
+                  postResponse.success ? 'status-success' : 'status-error',
+                ]"
+              >
+                {{ postResponse.status }} {{ postResponse.statusText || "" }}
+              </span>
             </div>
-            <div v-if="sseMessages.length === 0" class="message-empty">
-              No SSE messages yet
+            <div class="response-data">
+              <pre>{{ JSON.stringify(postResponse, null, 2) }}</pre>
             </div>
           </div>
         </div>
@@ -198,14 +189,13 @@ const payment = usePayment();
 const paymentResult = payment.paymentResult;
 const isRequesting = payment.isRequesting;
 
-// SSE state
-const sseUrl = ref<string>("http://localhost:4021/generate");
-const sseParams = ref<string>("");
-const sse = useSSE();
-const sseMessages = sse.sseMessages;
-const isConnectingSSE = sse.isConnecting;
-const isConnectedSSE = sse.isConnected;
-const sseError = sse.sseError;
+// POST Request state
+const postUrl = ref<string>("http://localhost:4021/generate");
+const postBody = ref<string>("");
+const post = useSSE();
+const postResponse = post.postResponse;
+const isRequestingPost = post.isRequesting;
+const postError = post.postError;
 
 // Logs
 const logs = ref<Array<{ time: string; message: string; type: string }>>([]);
@@ -231,10 +221,6 @@ const handleDisconnectWallet = () => {
   disconnect();
   addLog("Wallet disconnected", "info", logs);
   paymentResult.value = null;
-  // Also disconnect SSE if connected
-  if (isConnectedSSE.value) {
-    sse.disconnectSSE();
-  }
 };
 
 // Make payment request
@@ -286,43 +272,39 @@ const makePaymentRequest = async () => {
   }
 };
 
-// Connect SSE
-const handleConnectSSE = async () => {
-  if (!sseUrl.value.trim()) {
-    addLog("Please enter SSE URL", "error", logs);
+// Make POST request
+const handlePostRequest = async () => {
+  if (!postUrl.value.trim()) {
+    addLog("Please enter URL", "error", logs);
     return;
   }
 
   try {
-    addLog(`Connecting to SSE: ${sseUrl.value}`, "info", logs);
+    addLog(`Making POST request: ${postUrl.value}`, "info", logs);
 
-    // Parse parameters if provided
-    let params: Record<string, any> | undefined;
-    if (sseParams.value.trim()) {
+    // Parse body if provided
+    let body: Record<string, any> | undefined;
+    if (postBody.value.trim()) {
       try {
-        params = JSON.parse(sseParams.value);
+        body = JSON.parse(postBody.value);
       } catch (error) {
-        addLog("Invalid JSON parameters, ignoring", "error", logs);
+        addLog("Invalid JSON body, ignoring", "error", logs);
+        return;
       }
     }
 
-    await sse.connectSSE(sseUrl.value, params);
-    addLog("SSE connection initiated", "success", logs);
+    await post.makePostRequest(postUrl.value, body);
+    addLog("POST request completed", "success", logs);
   } catch (error: any) {
     const errorMsg = error.message || String(error);
-    addLog(`SSE connection failed: ${errorMsg}`, "error", logs);
+    addLog(`POST request failed: ${errorMsg}`, "error", logs);
   }
 };
 
-// Disconnect SSE
-const handleDisconnectSSE = () => {
-  sse.disconnectSSE();
-  addLog("SSE disconnected", "info", logs);
-};
-
-// Clear SSE messages
-const clearSSEMessages = () => {
-  sse.clearMessages();
+// Clear POST response
+const clearPostResponse = () => {
+  post.clearResponse();
+  addLog("POST response cleared", "info", logs);
 };
 
 // Clear logs
@@ -496,8 +478,8 @@ section h2 {
   line-height: 1.5;
 }
 
-/* SSE section */
-.sse-section {
+/* POST section */
+.post-section {
   background: #f9f9f9;
   border: 1px solid #eee;
   border-radius: 8px;
@@ -505,22 +487,22 @@ section h2 {
   margin-top: 24px;
 }
 
-.sse-controls {
+.post-controls {
   display: flex;
   flex-direction: column;
   gap: 12px;
   margin-bottom: 20px;
 }
 
-.sse-url-input,
-.sse-params-input {
+.post-url-input,
+.post-body-input {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
-.sse-url-input label,
-.sse-params-input label {
+.post-url-input label,
+.post-body-input label {
   font-weight: 600;
   color: #333;
   min-width: 80px;
@@ -546,87 +528,70 @@ section h2 {
   cursor: not-allowed;
 }
 
-.sse-buttons {
+.post-buttons {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
 }
 
-/* SSE Messages */
-.sse-messages {
-  background: #f0f9eb; /* Light green background */
-  border: 1px solid #a5d6a7; /* Green border */
-  border-radius: 4px;
-  padding: 16px;
-  max-height: 300px;
-  overflow-y: auto;
+/* POST Response */
+.post-response {
   margin-top: 20px;
 }
 
-.sse-messages h3 {
-  margin-top: 0;
-  margin-bottom: 10px;
-  color: #4caf50;
-  border-bottom: 1px solid #a5d6a7;
-  padding-bottom: 5px;
-}
-
-.messages-container {
-  display: flex;
-  flex-direction: column;
-}
-
-.message-item {
-  display: flex;
-  gap: 10px;
-  padding: 8px 0;
-  border-bottom: 1px dashed #e0f2f7; /* Light blue dashed border */
-}
-
-.message-item:last-child {
-  border-bottom: none;
-}
-
-.message-time {
-  color: #999;
-  font-size: 0.85rem;
-  min-width: 120px;
-}
-
-.message-type {
-  font-weight: bold;
-  color: #2196f3; /* Blue color for type */
-}
-
-.message-data {
-  flex: 1;
-  font-family: "Courier New", monospace;
-  font-size: 0.9rem;
+.post-response h3 {
+  margin-bottom: 12px;
   color: #333;
-  background: #e0f2f7; /* Light blue background for data */
-  padding: 4px 8px;
+  border-bottom: 2px solid #4caf50;
+  padding-bottom: 8px;
+}
+
+.response-content {
+  background: #f5f5f5;
+  border-radius: 4px;
+  padding: 16px;
+}
+
+.response-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #ddd;
+}
+
+.status-label {
+  font-weight: 600;
+  color: #333;
+}
+
+.status-value {
+  font-family: "Courier New", monospace;
+  font-weight: 600;
+  padding: 4px 12px;
   border-radius: 4px;
 }
 
-.message-success .message-data {
-  color: #4caf50; /* Green for success */
+.status-success {
+  color: #4caf50;
   background: #e8f5e9;
 }
 
-.message-error .message-data {
-  color: #c62828; /* Red for error */
+.status-error {
+  color: #c62828;
   background: #ffebee;
 }
 
-.message-info .message-data {
-  color: #2196f3; /* Blue for info */
-  background: #e3f2fd;
+.response-data {
+  overflow-x: auto;
 }
 
-.message-empty {
-  text-align: center;
-  color: #999;
-  padding: 20px;
+.response-data pre {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #333;
 }
 
 /* Logs section */

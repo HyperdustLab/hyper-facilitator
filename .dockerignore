@@ -1,0 +1,73 @@
+# Node modules
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+build/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Documentation
+*.md
+!examples/typescript/servers/advanced/README.md
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+**/__tests__/
+
+# Other examples (only need advanced server)
+examples/typescript/clients/
+examples/typescript/agent/
+examples/typescript/discovery/
+examples/typescript/facilitator/
+examples/typescript/fullstack/
+examples/typescript/dynamic_agent/
+examples/typescript/mcp/
+examples/typescript/mcp-embedded-wallet/
+examples/typescript/servers/simple/
+examples/typescript/servers/mainnet/
+
+# Python and Go examples
+examples/python/
+go/
+java/
+python/
+
+# E2E tests
+e2e/
+
+# Static files
+static/
+
+# Specs
+specs/
+
+# Other monorepo packages not needed
+typescript/packages/coinbase-x402/
+typescript/packages/x402-axios/
+typescript/packages/x402-express/
+typescript/packages/x402-fetch/
+typescript/packages/x402-hono/
+typescript/packages/x402-next/
+typescript/site/
+

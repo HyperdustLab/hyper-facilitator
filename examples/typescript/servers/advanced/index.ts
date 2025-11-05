@@ -52,18 +52,85 @@ app.use(
   }),
 );
 
-// Explicitly handle OPTIONS preflight requests
-app.options("*", cors());
+// CORS middleware already handles OPTIONS preflight requests
+// No need for explicit app.options("*") handler
+
+// Add global request logging middleware for debugging
+app.use((req, res, next) => {
+  if (req.path === "/generate") {
+    console.log(`[Global Middleware] ${req.method} ${req.path} - Request received`);
+    console.log(`[Global Middleware] Original URL: ${req.originalUrl}`);
+    console.log(`[Global Middleware] Content-Type: ${req.headers["content-type"]}`);
+    console.log(`[Global Middleware] Content-Length: ${req.headers["content-length"]}`);
+  }
+  next();
+});
 
 // Add JSON, URL-encoded, and text parsing middleware
 // Note: Order matters - specific parsers should come before catch-all raw parser
 app.use(express.json()); // Parse application/json first
 app.use(express.urlencoded({ extended: true })); // Parse application/x-www-form-urlencoded
-app.use(express.text({ type: "text/plain" })); // Parse text/plain as string for SSE proxy
+app.use(express.text({ type: "text/plain" })); // Parse text/plain as string
 app.use(express.raw({ type: "*/*", limit: "10mb" })); // Capture raw body for all other types (fallback)
 
 const { verify, settle } = useFacilitator({ url: facilitatorUrl });
 const x402Version = 1;
+
+// Register /generate routes early to ensure they are matched first
+// This is important because body parsing middleware might affect routing
+console.log("[Server] Registering /generate route early...");
+
+// Add middleware to log all requests to /generate before routing
+app.use("/generate", (req, res, next) => {
+  console.log(`[Generate Middleware] ===== ${req.method} ${req.path} =====`);
+  console.log(`[Generate Middleware] Original URL: ${req.originalUrl}`);
+  console.log(`[Generate Middleware] URL: ${req.url}`);
+  console.log(`[Generate Middleware] Headers:`, JSON.stringify(req.headers, null, 2));
+  console.log(
+    `[Generate Middleware] X-PAYMENT header:`,
+    req.header("X-PAYMENT") || req.header("x-payment") || "not present",
+  );
+  next();
+});
+
+// Handle OPTIONS preflight for /generate first - MUST be before other routes
+app.options("/generate", (req, res) => {
+  console.log(`[Generate] ===== OPTIONS preflight request =====`);
+  res.status(200).end();
+});
+
+// Register GET method for /generate
+app.get("/generate", async (req, res, next) => {
+  try {
+    console.log(`[Generate] ===== GET route matched =====`);
+    await handleGenerate(req, res);
+  } catch (error) {
+    console.error(`[Generate] Error in GET route handler:`, error);
+    if (!res.headersSent) {
+      next(error);
+    }
+  }
+});
+
+// Register POST method for /generate - MUST use app.post() directly
+app.post("/generate", async (req, res, next) => {
+  try {
+    console.log(`[Generate] ===== POST route matched =====`);
+    console.log(`[Generate] Request method: ${req.method}`);
+    console.log(`[Generate] Request path: ${req.path}`);
+    console.log(`[Generate] Request URL: ${req.url}`);
+    console.log(`[Generate] Original URL: ${req.originalUrl}`);
+    console.log(`[Generate] Calling handleGenerate...`);
+    await handleGenerate(req, res);
+  } catch (error) {
+    console.error(`[Generate] Error in POST route handler:`, error);
+    if (!res.headersSent) {
+      next(error);
+    }
+  }
+});
+
+console.log("[Server] /generate route registered early (supports GET, POST, and OPTIONS)");
 
 // Simple CORS test endpoint (for debugging)
 app.get("/health", (req, res) => {
@@ -131,7 +198,20 @@ async function verifyPayment(
   );
   res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
-  const payment = req.header("X-PAYMENT");
+  // Check header using multiple methods to debug
+  const paymentHeader = req.header("X-PAYMENT") || req.header("x-payment");
+  const paymentHeaders = req.headers["x-payment"] || req.headers["X-PAYMENT"];
+  const payment =
+    paymentHeader || (Array.isArray(paymentHeaders) ? paymentHeaders[0] : paymentHeaders);
+
+  console.log("[Verify] Checking X-PAYMENT header:");
+  console.log("[Verify] req.header('X-PAYMENT'):", req.header("X-PAYMENT"));
+  console.log("[Verify] req.header('x-payment'):", req.header("x-payment"));
+  console.log("[Verify] req.headers['x-payment']:", req.headers["x-payment"]);
+  console.log("[Verify] req.headers['X-PAYMENT']:", req.headers["X-PAYMENT"]);
+  console.log("[Verify] All headers keys:", Object.keys(req.headers));
+  console.log("[Verify] Final payment value:", payment);
+
   if (!payment) {
     console.log("[Verify] X-PAYMENT header not found, returning 402");
     res.status(402).json({
@@ -369,13 +449,13 @@ app.get("/multiple-payment-requirements", async (req, res) => {
 });
 
 /**
- * Proxies SSE (Server-Sent Events) requests to a target URL
+ * Proxies POST requests to a target URL
  *
  * @param req - The Express request object
  * @param res - The Express response object
  * @param targetPath - The target path to proxy to
  */
-async function proxySSE(
+async function proxyPost(
   req: express.Request,
   res: express.Response,
   targetPath: string,
@@ -394,15 +474,9 @@ async function proxySSE(
     const isHttps = targetUrl.protocol === "https:";
     const httpModule = isHttps ? https : http;
 
-    // Set SSE headers
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // Disable buffering in Nginx
-
     // Prepare request options - Always use POST method for proxy requests
     const requestMethod = "POST";
-    console.log(`[SSE Proxy] Proxying ${requestMethod} request to: ${targetUrl.toString()}`);
+    console.log(`[Proxy] Proxying ${requestMethod} request to: ${targetUrl.toString()}`);
 
     // Build headers for proxy request
     // Remove hop-by-hop headers and headers that shouldn't be forwarded
@@ -432,33 +506,15 @@ async function proxySSE(
     proxyHeaders["x-forwarded-for"] = req.ip || req.socket.remoteAddress || "";
     proxyHeaders["x-forwarded-proto"] = req.protocol;
     proxyHeaders["x-forwarded-host"] = req.get("host") || "";
-    proxyHeaders["accept"] = "text/event-stream";
 
     // Handle request body and set appropriate headers
-    // Server expects String type, so we need to preserve the original body string
     let requestBody: Buffer | string | null = null;
     const originalContentType = req.headers["content-type"] || "";
     const originalContentLength = req.headers["content-length"];
 
     console.log(
-      `[SSE Proxy] Original request - Content-Type: ${originalContentType}, Content-Length: ${originalContentLength}, req.body type: ${typeof req.body}`,
+      `[Proxy] Original request - Content-Type: ${originalContentType}, Content-Length: ${originalContentLength}, req.body type: ${typeof req.body}`,
     );
-    console.log("[SSE Proxy] req.body details:", {
-      body: req.body,
-      bodyType: typeof req.body,
-      isBuffer: Buffer.isBuffer(req.body),
-      isObject: typeof req.body === "object",
-      isArray: Array.isArray(req.body),
-      keys:
-        req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)
-          ? Object.keys(req.body)
-          : null,
-      bodyStringified: req.body && !Buffer.isBuffer(req.body) ? JSON.stringify(req.body) : null,
-      bodyBufferLength: Buffer.isBuffer(req.body) ? req.body.length : null,
-      bodyBufferPreview: Buffer.isBuffer(req.body)
-        ? req.body.toString("utf8").substring(0, 100)
-        : null,
-    });
 
     if (req.body !== undefined && req.body !== null) {
       // Check if body was parsed by express.raw() as Buffer
@@ -468,41 +524,51 @@ async function proxySSE(
         proxyHeaders["Content-Type"] = originalContentType || "text/plain";
         proxyHeaders["Content-Length"] = req.body.length.toString();
         console.log(
-          `[SSE Proxy] Request has Buffer body: ${req.body.length} bytes, converted to string: ${requestBody.length} bytes, body: ${requestBody.substring(0, 100)}`,
+          `[Proxy] Request has Buffer body: ${req.body.length} bytes, converted to string: ${requestBody.length} bytes`,
         );
       } else if (typeof req.body === "string") {
         // Body is already a string (from text/plain or raw body)
         requestBody = req.body;
         proxyHeaders["Content-Type"] = originalContentType || "text/plain";
         proxyHeaders["Content-Length"] = Buffer.byteLength(requestBody).toString();
-        console.log(
-          `[SSE Proxy] Request has string body: ${requestBody.length} bytes, body: ${requestBody.substring(0, 100)}`,
-        );
-      } else if (typeof req.body === "object" && Object.keys(req.body).length > 0) {
+        console.log(`[Proxy] Request has string body: ${requestBody.length} bytes`);
+      } else if (typeof req.body === "object") {
         // Body was parsed as JSON object by express.json(), convert back to JSON string for server
-        // Server expects String type, so we need to stringify the object
-        requestBody = JSON.stringify(req.body);
-        // Keep original content-type if it was application/json, otherwise use text/plain
-        proxyHeaders["Content-Type"] = originalContentType.includes("application/json")
-          ? "application/json"
-          : "text/plain";
+        const hasContentLength = originalContentLength && parseInt(originalContentLength) > 0;
+        const isPostRequest = req.method === "POST";
+        const isEmptyObject = Object.keys(req.body).length === 0;
+
+        // If it's a POST request with Content-Length > 0, or object has keys, stringify it
+        if (!isEmptyObject || (isPostRequest && hasContentLength)) {
+          requestBody = JSON.stringify(req.body);
+          // Keep original content-type if it was application/json, otherwise use text/plain
+          proxyHeaders["Content-Type"] = originalContentType.includes("application/json")
+            ? "application/json"
+            : "text/plain";
+          proxyHeaders["Content-Length"] = Buffer.byteLength(requestBody).toString();
+          console.log(
+            `[Proxy] Request has JSON body, converted to string: ${requestBody.length} bytes, Content-Type: ${proxyHeaders["Content-Type"]}`,
+          );
+        } else {
+          // Empty object without Content-Length - treat as no body
+          requestBody = null;
+          proxyHeaders["Content-Length"] = "0";
+          console.log("[Proxy] Request has empty body (empty object without Content-Length)");
+        }
+      } else {
+        // Other types (shouldn't happen, but handle gracefully)
+        requestBody = String(req.body);
+        proxyHeaders["Content-Type"] = originalContentType || "text/plain";
         proxyHeaders["Content-Length"] = Buffer.byteLength(requestBody).toString();
         console.log(
-          `[SSE Proxy] Request has JSON body, converted to string: ${requestBody.length} bytes, Content-Type: ${proxyHeaders["Content-Type"]}, body: ${requestBody.substring(0, 100)}`,
+          `[Proxy] Request has unexpected body type: ${typeof req.body}, converted to string: ${requestBody.length} bytes`,
         );
-      } else {
-        // Empty object or null
-        requestBody = null;
-        proxyHeaders["Content-Length"] = "0";
-        console.log("[SSE Proxy] Request has empty body (empty object)");
       }
     } else {
       // req.body is undefined or null - check if there's a Content-Length header
       if (originalContentLength && parseInt(originalContentLength) > 0) {
-        // There's a Content-Length header but body wasn't parsed - this shouldn't happen
-        // but we'll handle it by setting Content-Length to 0
         console.warn(
-          `[SSE Proxy] Warning: Content-Length header exists (${originalContentLength}) but req.body is undefined`,
+          `[Proxy] Warning: Content-Length header exists (${originalContentLength}) but req.body is undefined`,
         );
         requestBody = null;
         proxyHeaders["Content-Length"] = "0";
@@ -510,7 +576,7 @@ async function proxySSE(
         // No body, set Content-Length: 0 for POST request
         requestBody = null;
         proxyHeaders["Content-Length"] = "0";
-        console.log("[SSE Proxy] Request has no body, sending empty POST");
+        console.log("[Proxy] Request has no body, sending empty POST");
       }
     }
 
@@ -524,6 +590,9 @@ async function proxySSE(
 
     // Create the proxy request
     const proxyReq = httpModule.request(requestOptions, proxyRes => {
+      // Collect response data
+      let responseData = Buffer.alloc(0);
+
       // Set status code
       res.status(proxyRes.statusCode || 200);
 
@@ -539,52 +608,48 @@ async function proxySSE(
         }
       });
 
-      // Ensure SSE headers are set correctly
-      if (!res.getHeader("Content-Type") || res.getHeader("Content-Type") !== "text/event-stream") {
-        res.setHeader("Content-Type", "text/event-stream");
-      }
-
-      // Pipe the response stream to the client
+      // Collect response chunks
       proxyRes.on("data", chunk => {
-        if (!res.destroyed) {
-          res.write(chunk);
-        }
+        responseData = Buffer.concat([responseData, chunk]);
       });
 
       proxyRes.on("end", () => {
-        if (!res.destroyed) {
-          res.end();
+        if (!res.headersSent) {
+          // Set Content-Type if not already set
+          if (!res.getHeader("Content-Type")) {
+            res.setHeader("Content-Type", "application/json");
+          }
+          // Send the complete response
+          res.send(responseData);
         }
       });
 
       proxyRes.on("error", error => {
-        console.error("[SSE Proxy] Response error:", error);
-        if (!res.destroyed) {
-          res.status(500).end();
+        console.error("[Proxy] Response error:", error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Proxy response error", message: error.message });
         }
       });
     });
 
     // Handle proxy request errors
     proxyReq.on("error", error => {
-      console.error(`[SSE Proxy] Request error (${requestMethod} ${targetUrl.toString()}):`, error);
-      if (!res.destroyed && !res.headersSent) {
+      console.error(`[Proxy] Request error (${requestMethod} ${targetUrl.toString()}):`, error);
+      if (!res.headersSent) {
         res.status(502).json({ error: "Proxy request failed", message: error.message });
       }
     });
 
     // Send request body for POST requests
     if (requestBody) {
-      // Send body if present
       console.log(
-        `[SSE Proxy] Sending request body: ${Buffer.byteLength(requestBody)} bytes, Content-Type: ${proxyHeaders["Content-Type"]}`,
+        `[Proxy] Sending request body: ${Buffer.byteLength(requestBody)} bytes, Content-Type: ${proxyHeaders["Content-Type"]}`,
       );
       proxyReq.write(requestBody);
       proxyReq.end();
     } else {
-      // Send empty body for POST request
       console.log(
-        `[SSE Proxy] Sending empty POST request, Content-Length: ${proxyHeaders["Content-Length"]}`,
+        `[Proxy] Sending empty POST request, Content-Length: ${proxyHeaders["Content-Length"]}`,
       );
       proxyReq.end();
     }
@@ -592,16 +657,13 @@ async function proxySSE(
     // Handle client disconnect
     req.on("close", () => {
       proxyReq.destroy();
-      if (!res.destroyed) {
-        res.end();
-      }
     });
 
     res.on("close", () => {
       proxyReq.destroy();
     });
   } catch (error) {
-    console.error("[SSE Proxy] Error:", error);
+    console.error("[Proxy] Error:", error);
     if (!res.headersSent) {
       res.status(500).json({
         error: "Proxy error",
@@ -611,23 +673,46 @@ async function proxySSE(
   }
 }
 
-// SSE proxy endpoint for /generate
+// POST proxy endpoint for /generate
 // Supports both GET and POST methods
 // POST: receives parameters from request body
 // GET: receives parameters from query string and converts to body for proxy
-app.all("/generate", async (req, res) => {
-  console.log(`[SSE Proxy] Received ${req.method} request for /generate (will proxy as POST)`);
+// x402 protocol verification is performed before proxying
+async function handleGenerate(req: express.Request, res: express.Response) {
+  console.log(`[Generate] === Route handler called ===`);
+  console.log(`[Generate] Method: ${req.method}`);
+  console.log(`[Generate] URL: ${req.url}`);
+  console.log(`[Generate] Path: ${req.path}`);
+  console.log(`[Generate] Received ${req.method} request for /generate (will proxy as POST)`);
 
   // For GET requests, convert query parameters to body
-  // For POST requests, use the existing body
+  // For POST requests, ensure body is properly handled
   if (req.method === "GET" && Object.keys(req.query).length > 0) {
     // Convert query parameters to body for GET requests
     req.body = req.query;
-    console.log("[SSE Proxy] GET request - converted query params to body:", req.body);
+    console.log("[Generate] GET request - converted query params to body:", req.body);
+  } else if (req.method === "POST") {
+    // For POST requests, ensure body is available
+    // If body is undefined or null, it means it wasn't parsed by middleware
+    // In that case, we need to check if there's a raw body available
+    if (req.body === undefined || req.body === null) {
+      console.warn("[Generate] POST request body is undefined or null, checking for raw body");
+      // Check if body was captured by express.raw() middleware
+      // If Content-Length > 0, there should be a body
+      const contentLength = req.headers["content-length"];
+      if (contentLength && parseInt(contentLength) > 0) {
+        console.warn("[Generate] Content-Length indicates body exists but wasn't parsed");
+        // Body should have been parsed by one of the middleware, but if not,
+        // it might be in req.body as Buffer from express.raw()
+        // This should not happen if middleware is configured correctly
+      }
+    } else {
+      console.log("[Generate] POST request body is available:", typeof req.body, req.body);
+    }
   }
 
   // Print detailed request parameters
-  console.log("=== SSE Request Parameters ===");
+  console.log("=== Request Parameters ===");
   console.log("Request Method:", req.method);
   console.log("Request Headers:", JSON.stringify(req.headers, null, 2));
   console.log("Content-Type:", req.headers["content-type"] || "not set");
@@ -641,16 +726,15 @@ app.all("/generate", async (req, res) => {
     console.log("Request Body Keys:", Object.keys(req.body));
     console.log("Request Body Values:", Object.values(req.body));
   }
-  console.log("=== End SSE Request Parameters ===");
+  if (Buffer.isBuffer(req.body)) {
+    console.log("Request Body (Buffer):", req.body.length, "bytes");
+  }
+  console.log("=== End Request Parameters ===");
 
+  // Handle x402 protocol verification before proxying
   const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
   const paymentRequirements = [
-    createExactPaymentRequirements(
-      "$0.001",
-      "base-sepolia",
-      resource,
-      "Access to async chat API (SSE)",
-    ),
+    createExactPaymentRequirements("$0.001", "base-sepolia", resource, "Access to chat API"),
   ];
 
   const isValid = await verifyPayment(req, res, paymentRequirements);
@@ -664,15 +748,21 @@ app.all("/generate", async (req, res) => {
       const settleResponse = await settle(decodedPayment, paymentRequirements[0]);
       const responseHeader = settleResponseHeader(settleResponse);
       res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
-      console.log("[SSE Proxy] Payment settled successfully");
+      console.log("[Proxy] Payment settled successfully");
     }
   } catch (error) {
-    console.error("[SSE Proxy] Payment settlement failed:", error);
+    console.error("[Proxy] Payment settlement failed:", error);
     // Continue with proxy even if settlement fails
   }
 
-  // Proxy the SSE request
-  await proxySSE(req, res, "/mgn/agent/asyncChat");
+  // Proxy the POST request
+  await proxyPost(req, res, "/mgn/agent/syncChat");
+}
+
+// Add a catch-all 404 handler for debugging (after all routes)
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.log(`[404] ${req.method} ${req.path} - Route not found`);
+  res.status(404).json({ error: "Route not found", method: req.method, path: req.path });
 });
 
 // Global error handling middleware, ensure error responses also include CORS headers
@@ -691,5 +781,6 @@ app.listen(4021, () => {
   console.log(`  GET /dynamic-price`);
   console.log(`  GET /delayed-settlement`);
   console.log(`  GET /multiple-payment-requirements`);
-  console.log(`  GET/POST /generate (SSE proxy)`);
+  console.log(`  GET /generate (POST proxy with x402)`);
+  console.log(`  POST /generate (POST proxy with x402)`);
 });
