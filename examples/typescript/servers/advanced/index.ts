@@ -36,7 +36,10 @@ const redis = new Redis(redisUrl, {
     const delay = Math.min(times * 50, 2000);
     return delay;
   },
-  maxRetriesPerRequest: 3,
+  maxRetriesPerRequest: 5, // 增加重试次数从 3 到 5
+  enableReadyCheck: true, // 启用就绪检查
+  connectTimeout: 10000, // 连接超时时间（毫秒）
+  lazyConnect: false, // 立即连接
 });
 
 redis.on("error", (err: Error) => {
@@ -47,7 +50,7 @@ redis.on("connect", () => {
   console.log("[Redis] Connected successfully");
 });
 
-const FREE_USAGE_LIMIT = 6;
+const FREE_USAGE_LIMIT = 5;
 const USER_USAGE_KEY_PREFIX = "user:usage:";
 
 const app = express();
@@ -354,11 +357,17 @@ async function getCurrentUser(token: string): Promise<{ userId: string } | null>
  */
 async function getUserUsageCount(userId: string): Promise<number> {
   try {
+    // 检查 Redis 连接状态
+    if (redis.status !== "ready") {
+      console.warn(`[Usage] Redis not ready (status: ${redis.status}), returning 0`);
+      return 0;
+    }
     const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
     const count = await redis.get(key);
     return count ? parseInt(count, 10) : 0;
   } catch (error) {
     console.error(`[Usage] Error getting usage count for user ${userId}:`, error);
+    // 如果 Redis 操作失败，返回 0 以允许请求继续
     return 0;
   }
 }
@@ -371,6 +380,11 @@ async function getUserUsageCount(userId: string): Promise<number> {
  */
 async function incrementUserUsage(userId: string): Promise<void> {
   try {
+    // 检查 Redis 连接状态
+    if (redis.status !== "ready") {
+      console.warn(`[Usage] Redis not ready (status: ${redis.status}), skipping usage increment`);
+      return;
+    }
     const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
     const count = await redis.incr(key);
 
@@ -382,7 +396,8 @@ async function incrementUserUsage(userId: string): Promise<void> {
     console.log(`[Usage] User ${userId} usage count: ${count}`);
   } catch (error) {
     console.error(`[Usage] Error incrementing usage for user ${userId}:`, error);
-    throw error;
+    // 不抛出错误，允许请求继续处理，即使 Redis 操作失败
+    // 在生产环境中，您可能需要根据业务需求决定是否抛出错误
   }
 }
 
