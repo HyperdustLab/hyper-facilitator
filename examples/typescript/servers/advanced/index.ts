@@ -15,17 +15,40 @@ import { processPriceToAtomicAmount, findMatchingPaymentRequirements } from "x40
 import https from "https";
 import http from "http";
 import { URL } from "url";
+import Redis from "ioredis";
 
 config();
 
 const facilitatorUrl = process.env.FACILITATOR_URL as Resource;
 const payTo = process.env.ADDRESS as `0x${string}`;
 const proxyTargetUrl = process.env.PROXY_TARGET_URL || "http://127.0.0.1:9999";
+const apiBaseUrl = process.env.API || "";
+const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
 
 if (!facilitatorUrl || !payTo) {
   console.error("Missing required environment variables");
   process.exit(1);
 }
+
+// Redis 客户端初始化
+const redis = new Redis(redisUrl, {
+  retryStrategy: (times: number) => {
+    const delay = Math.min(times * 50, 2000);
+    return delay;
+  },
+  maxRetriesPerRequest: 3,
+});
+
+redis.on("error", (err: Error) => {
+  console.error("[Redis] Connection error:", err);
+});
+
+redis.on("connect", () => {
+  console.log("[Redis] Connected successfully");
+});
+
+const FREE_USAGE_LIMIT = 6;
+const USER_USAGE_KEY_PREFIX = "user:usage:";
 
 const app = express();
 
@@ -43,6 +66,8 @@ app.use(
       "X-PAYMENT",
       "Authorization",
       "Cache-Control",
+      "x-access-token",
+      "X-Access-Token",
     ],
     exposedHeaders: ["X-PAYMENT-RESPONSE"],
     credentials: false, // If origin is "*", credentials must be false
@@ -169,10 +194,13 @@ function createExactPaymentRequirements(
     maxTimeoutSeconds: 60,
     asset: asset.address,
     outputSchema: undefined,
-    extra: {
-      name: asset.eip712.name,
-      version: asset.eip712.version,
-    },
+    extra:
+      "eip712" in asset
+        ? {
+            name: asset.eip712.name,
+            version: asset.eip712.version,
+          }
+        : undefined,
   };
 }
 
@@ -194,7 +222,7 @@ async function verifyPayment(
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control",
+    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control, x-access-token, X-Access-Token",
   );
   res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
@@ -267,6 +295,91 @@ async function verifyPayment(
   return true;
 }
 
+/**
+ * 通过 token 获取当前用户信息
+ *
+ * @param token - 访问令牌
+ * @returns Promise<{ userId: string } | null> - 用户信息或 null
+ */
+async function getCurrentUser(token: string): Promise<{ userId: string } | null> {
+  if (!apiBaseUrl) {
+    console.error("[User] API base URL not configured");
+    return null;
+  }
+
+  try {
+    const url = new URL("/sys/getCurrUser", apiBaseUrl);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        "x-access-token": token,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      console.error(`[User] Failed to get user info: ${response.status} ${response.statusText}`);
+      return null;
+    }
+
+    const userData = await response.json();
+    console.log("[User] User data received:", userData);
+
+    // 假设返回的数据结构包含 userId 字段
+    // 根据实际 API 响应结构调整
+    const userId = userData.userId || userData.id || userData.user?.id;
+    if (!userId) {
+      console.error("[User] User ID not found in response");
+      return null;
+    }
+
+    return { userId: String(userId) };
+  } catch (error) {
+    console.error("[User] Error fetching user info:", error);
+    return null;
+  }
+}
+
+/**
+ * 获取用户使用次数
+ *
+ * @param userId - 用户 ID
+ * @returns Promise<number> - 当前使用次数
+ */
+async function getUserUsageCount(userId: string): Promise<number> {
+  try {
+    const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
+    const count = await redis.get(key);
+    return count ? parseInt(count, 10) : 0;
+  } catch (error) {
+    console.error(`[Usage] Error getting usage count for user ${userId}:`, error);
+    return 0;
+  }
+}
+
+/**
+ * 增加用户使用次数
+ *
+ * @param userId - 用户 ID
+ * @returns Promise<void>
+ */
+async function incrementUserUsage(userId: string): Promise<void> {
+  try {
+    const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
+    const count = await redis.incr(key);
+
+    // 设置过期时间为30天（可选，根据业务需求调整）
+    if (count === 1) {
+      await redis.expire(key, 30 * 24 * 60 * 60);
+    }
+
+    console.log(`[Usage] User ${userId} usage count: ${count}`);
+  } catch (error) {
+    console.error(`[Usage] Error incrementing usage for user ${userId}:`, error);
+    throw error;
+  }
+}
+
 // Delayed settlement example endpoint
 app.get("/delayed-settlement", async (req, res) => {
   const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
@@ -319,7 +432,7 @@ app.get("/dynamic-price", async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control",
+    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control, x-access-token, X-Access-Token",
   );
   res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
@@ -465,7 +578,7 @@ async function proxyPost(
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control",
+    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control, x-access-token, X-Access-Token",
   );
   res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
@@ -677,15 +790,88 @@ async function proxyPost(
 // Supports both GET and POST methods
 // POST: receives parameters from request body
 // GET: receives parameters from query string and converts to body for proxy
-// x402 protocol verification is performed before proxying
+// x402 protocol verification is performed before proxying (only if usage exceeds free limit)
 async function handleGenerate(req: express.Request, res: express.Response) {
-  console.log(`[Generate] === Route handler called ===`);
-  console.log(`[Generate] Method: ${req.method}`);
-  console.log(`[Generate] URL: ${req.url}`);
-  console.log(`[Generate] Path: ${req.path}`);
-  console.log(`[Generate] Received ${req.method} request for /generate (will proxy as POST)`);
+  // Set CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control, x-access-token, X-Access-Token",
+  );
+  res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
-  // For GET requests, convert query parameters to body
+  // 1. 从请求头获取 x-access-token
+  const accessTokenHeader = req.header("x-access-token") || req.header("X-Access-Token");
+  const accessTokenArray = req.headers["x-access-token"];
+  const accessToken =
+    accessTokenHeader ||
+    (Array.isArray(accessTokenArray) ? accessTokenArray[0] : accessTokenArray) ||
+    "";
+
+  if (!accessToken) {
+    console.error("[Generate] Missing x-access-token header");
+    res.status(401).json({ error: "Missing x-access-token header" });
+    return;
+  }
+
+  // 2. 调用 /sys/getCurrUser 获取用户信息
+  const userInfo = await getCurrentUser(accessToken);
+  if (!userInfo) {
+    console.error("[Generate] Failed to get user info");
+    res.status(401).json({ error: "Failed to authenticate user" });
+    return;
+  }
+
+  const { userId } = userInfo;
+  console.log(`[Generate] User authenticated: ${userId}`);
+
+  // 3. 检查用户使用次数
+  const usageCount = await getUserUsageCount(userId);
+  const requiresPayment = usageCount >= FREE_USAGE_LIMIT;
+
+  console.log(
+    `[Generate] User ${userId} usage: ${usageCount}/${FREE_USAGE_LIMIT}, requiresPayment: ${requiresPayment}`,
+  );
+
+  // 4. 如果超过免费次数，需要 x402 支付
+  if (requiresPayment) {
+    const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
+    const paymentRequirements = [
+      createExactPaymentRequirements("$0.001", "base-sepolia", resource, "Access to chat API"),
+    ];
+
+    const isValid = await verifyPayment(req, res, paymentRequirements);
+    if (!isValid) {
+      console.log(`[Generate] Payment verification failed for user ${userId}`);
+      return;
+    }
+
+    // Process payment settlement
+    try {
+      const paymentHeader = req.header("X-PAYMENT");
+      if (paymentHeader) {
+        const decodedPayment = exact.evm.decodePayment(paymentHeader);
+        const settleResponse = await settle(decodedPayment, paymentRequirements[0]);
+        const responseHeader = settleResponseHeader(settleResponse);
+        res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
+        console.log("[Proxy] Payment settled successfully");
+      }
+    } catch (error) {
+      console.error("[Proxy] Payment settlement failed:", error);
+      res.status(402).json({
+        x402Version,
+        error: "Payment settlement failed",
+        accepts: paymentRequirements,
+      });
+      return;
+    }
+  }
+
+  // 5. 增加用户使用次数
+  await incrementUserUsage(userId);
+
+  // 6. For GET requests, convert query parameters to body
   // For POST requests, ensure body is properly handled
   if (req.method === "GET" && Object.keys(req.query).length > 0) {
     // Convert query parameters to body for GET requests
@@ -711,51 +897,14 @@ async function handleGenerate(req: express.Request, res: express.Response) {
     }
   }
 
-  // Print detailed request parameters
-  console.log("=== Request Parameters ===");
-  console.log("Request Method:", req.method);
-  console.log("Request Headers:", JSON.stringify(req.headers, null, 2));
-  console.log("Content-Type:", req.headers["content-type"] || "not set");
-  console.log("Content-Length:", req.headers["content-length"] || "not set");
-  console.log("Request URL:", req.url);
-  console.log("Query Parameters:", req.query);
-  console.log("Request Body Type:", typeof req.body);
-  console.log("Request Body:", req.body);
-  console.log("Request Body (stringified):", JSON.stringify(req.body, null, 2));
   if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
-    console.log("Request Body Keys:", Object.keys(req.body));
-    console.log("Request Body Values:", Object.values(req.body));
   }
   if (Buffer.isBuffer(req.body)) {
     console.log("Request Body (Buffer):", req.body.length, "bytes");
   }
   console.log("=== End Request Parameters ===");
 
-  // Handle x402 protocol verification before proxying
-  const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
-  const paymentRequirements = [
-    createExactPaymentRequirements("$0.001", "base-sepolia", resource, "Access to chat API"),
-  ];
-
-  const isValid = await verifyPayment(req, res, paymentRequirements);
-  if (!isValid) return;
-
-  // Process payment settlement
-  try {
-    const paymentHeader = req.header("X-PAYMENT");
-    if (paymentHeader) {
-      const decodedPayment = exact.evm.decodePayment(paymentHeader);
-      const settleResponse = await settle(decodedPayment, paymentRequirements[0]);
-      const responseHeader = settleResponseHeader(settleResponse);
-      res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
-      console.log("[Proxy] Payment settled successfully");
-    }
-  } catch (error) {
-    console.error("[Proxy] Payment settlement failed:", error);
-    // Continue with proxy even if settlement fails
-  }
-
-  // Proxy the POST request
+  // 7. Proxy the POST request
   await proxyPost(req, res, "/mgn/agent/syncChat");
 }
 
