@@ -22,7 +22,7 @@ config();
 const facilitatorUrl = process.env.FACILITATOR_URL as Resource;
 const payTo = process.env.ADDRESS as `0x${string}`;
 const proxyTargetUrl = process.env.PROXY_TARGET_URL || "http://127.0.0.1:9999";
-const apiBaseUrl = process.env.API || "";
+const apiBaseUrl = process.env.PROXY_TARGET_URL || "";
 const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
 
 if (!facilitatorUrl || !payTo) {
@@ -114,6 +114,10 @@ app.use("/generate", (req, res, next) => {
   console.log(
     `[Generate Middleware] X-PAYMENT header:`,
     req.header("X-PAYMENT") || req.header("x-payment") || "not present",
+  );
+  console.log(
+    `[Generate Middleware] x-access-token header:`,
+    req.header("x-access-token") || req.headers["x-access-token"] || "NOT FOUND",
   );
   next();
 });
@@ -327,11 +331,13 @@ async function getCurrentUser(token: string): Promise<{ userId: string } | null>
 
     // 假设返回的数据结构包含 userId 字段
     // 根据实际 API 响应结构调整
-    const userId = userData.userId || userData.id || userData.user?.id;
+    const userId = userData.result.id;
     if (!userId) {
       console.error("[User] User ID not found in response");
       return null;
     }
+
+    console.log("[User] User ID:", userId);
 
     return { userId: String(userId) };
   } catch (error) {
@@ -801,22 +807,40 @@ async function handleGenerate(req: express.Request, res: express.Response) {
   );
   res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
-  // 1. 从请求头获取 x-access-token
-  const accessTokenHeader = req.header("x-access-token") || req.header("X-Access-Token");
-  const accessTokenArray = req.headers["x-access-token"];
-  const accessToken =
-    accessTokenHeader ||
-    (Array.isArray(accessTokenArray) ? accessTokenArray[0] : accessTokenArray) ||
-    "";
+  // OPTIONS 预检请求不需要 token，直接返回成功
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
 
-  if (!accessToken) {
+  // 1. 从请求头获取 x-access-token
+  // Express 会将请求头转换为小写，所以使用小写键名
+  const accessTokenRaw = req.header("x-access-token") || req.headers["x-access-token"];
+  const finalAccessToken = Array.isArray(accessTokenRaw) ? accessTokenRaw[0] : accessTokenRaw;
+
+  // 添加调试日志（仅在缺少 token 时输出）
+  if (
+    !finalAccessToken ||
+    (typeof finalAccessToken === "string" && finalAccessToken.trim() === "")
+  ) {
+    const availableHeaders = Object.keys(req.headers);
     console.error("[Generate] Missing x-access-token header");
-    res.status(401).json({ error: "Missing x-access-token header" });
+    console.error("[Generate] Request method:", req.method);
+    console.error("[Generate] Available headers:", availableHeaders.join(", "));
+    console.error("[Generate] Header 'x-access-token':", req.headers["x-access-token"]);
+    console.error("[Generate] Full headers object:", JSON.stringify(req.headers, null, 2));
+
+    res.status(401).json({
+      error: "Missing x-access-token header",
+      message: "Please include 'x-access-token' header in your request",
+      receivedHeaders: availableHeaders,
+      method: req.method,
+    });
     return;
   }
 
   // 2. 调用 /sys/getCurrUser 获取用户信息
-  const userInfo = await getCurrentUser(accessToken);
+  const userInfo = await getCurrentUser(finalAccessToken);
   if (!userInfo) {
     console.error("[Generate] Failed to get user info");
     res.status(401).json({ error: "Failed to authenticate user" });
