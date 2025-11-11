@@ -229,6 +229,7 @@ app.get("/usage", async (req, res) => {
     console.log(`[Usage] User authenticated: ${userId}`);
 
     // 3. Get all usage values from Redis
+    // If user doesn't exist, initialize as new user
     let usedCount = 0;
     let totalFreeCount = FREE_USAGE_LIMIT;
     let remainingCount = FREE_USAGE_LIMIT;
@@ -244,9 +245,25 @@ app.get("/usage", async (req, res) => {
         const totalFreeCountStr = await redis.get(totalFreeCountKey);
         const remainingCountStr = await redis.get(remainingCountKey);
 
-        usedCount = usedCountStr ? parseInt(usedCountStr, 10) : 0;
-        totalFreeCount = totalFreeCountStr ? parseInt(totalFreeCountStr, 10) : FREE_USAGE_LIMIT;
-        remainingCount = remainingCountStr ? parseInt(remainingCountStr, 10) : FREE_USAGE_LIMIT;
+        // Only initialize new user if user doesn't exist at all (all keys are null)
+        // This prevents re-initializing users who have used up their free quota (remainingCount = 0)
+        const exists = await userExistsInRedis(userId);
+        if (!exists) {
+          console.log(`[Usage] User ${userId} not found in Redis, initializing as new user`);
+          await initializeNewUser(userId);
+          // After initialization, values are set to defaults
+          usedCount = 0;
+          totalFreeCount = FREE_USAGE_LIMIT;
+          remainingCount = FREE_USAGE_LIMIT;
+        } else {
+          // User exists, get values directly from Redis
+          // If value is null, use 0 (data may be incomplete, but don't use default values)
+          usedCount = usedCountStr ? parseInt(usedCountStr, 10) : 0;
+          totalFreeCount = totalFreeCountStr ? parseInt(totalFreeCountStr, 10) : FREE_USAGE_LIMIT;
+          // remainingCount should always be read from Redis, never calculated
+          // If null, return 0 (user may have used up all credits)
+          remainingCount = remainingCountStr ? parseInt(remainingCountStr, 10) : 0;
+        }
 
         console.log(
           `[Usage] Retrieved from Redis - usedCount: ${usedCount}, totalFreeCount: ${totalFreeCount}, remainingCount: ${remainingCount}`,
@@ -461,7 +478,79 @@ async function getCurrentUser(token: string): Promise<{ userId: string } | null>
 }
 
 /**
+ * Initialize new user with free usage limit
+ * Sets usedCount=0, totalFreeCount=5, remainingCount=5, paidCredits=0
+ *
+ * @param userId - User ID
+ * @returns Promise<void>
+ */
+async function initializeNewUser(userId: string): Promise<void> {
+  try {
+    if (redis.status !== "ready") {
+      console.warn(`[Usage] Redis not ready (status: ${redis.status}), cannot initialize user`);
+      return;
+    }
+
+    const usedCountKey = `${USER_USAGE_KEY_PREFIX}${userId}`;
+    const totalFreeCountKey = `${USER_TOTAL_FREE_COUNT_KEY_PREFIX}${userId}`;
+    const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
+    const paidCreditsKey = `${USER_PAID_CREDITS_KEY_PREFIX}${userId}`;
+
+    // Initialize all values for new user
+    await redis.set(usedCountKey, "0");
+    await redis.set(totalFreeCountKey, FREE_USAGE_LIMIT.toString());
+    await redis.set(remainingCountKey, FREE_USAGE_LIMIT.toString());
+    await redis.set(paidCreditsKey, "0");
+
+    console.log(`[Usage] Initialized new user ${userId} with ${FREE_USAGE_LIMIT} free usage count`);
+  } catch (error) {
+    console.error(`[Usage] Error initializing new user ${userId}:`, error);
+  }
+}
+
+/**
+ * Check if user exists in Redis
+ * User exists if at least one of the usage-related keys exists
+ *
+ * @param userId - User ID
+ * @returns Promise<boolean> - True if user exists, false otherwise
+ */
+async function userExistsInRedis(userId: string): Promise<boolean> {
+  try {
+    if (redis.status !== "ready") {
+      return false;
+    }
+    const usedCountKey = `${USER_USAGE_KEY_PREFIX}${userId}`;
+    const totalFreeCountKey = `${USER_TOTAL_FREE_COUNT_KEY_PREFIX}${userId}`;
+    const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
+    const paidCreditsKey = `${USER_PAID_CREDITS_KEY_PREFIX}${userId}`;
+
+    // Check if at least one key exists (user has been initialized before)
+    const [usedCount, totalFreeCount, remainingCount, paidCredits] = await Promise.all([
+      redis.get(usedCountKey),
+      redis.get(totalFreeCountKey),
+      redis.get(remainingCountKey),
+      redis.get(paidCreditsKey),
+    ]);
+
+    // User exists if at least one key has a value (not null)
+    // This prevents re-initializing users who have used up their free quota (remainingCount = 0)
+    return (
+      usedCount !== null ||
+      totalFreeCount !== null ||
+      remainingCount !== null ||
+      paidCredits !== null
+    );
+  } catch (error) {
+    console.error(`[Usage] Error checking if user exists: ${userId}:`, error);
+    return false;
+  }
+}
+
+/**
  * Get user usage count
+ * If user doesn't exist in Redis (all keys are null), initialize as new user with free usage limit
+ * If user exists but usedCount is null, return 0 (user may have partial data)
  *
  * @param userId - User ID
  * @returns Promise<number> - Current usage count
@@ -475,11 +564,78 @@ async function getUserUsageCount(userId: string): Promise<number> {
     }
     const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
     const count = await redis.get(key);
-    return count ? parseInt(count, 10) : 0;
+
+    // Only initialize new user if user doesn't exist at all (all keys are null)
+    // This prevents re-initializing users who have used up their free quota (remainingCount = 0)
+    if (count === null) {
+      const exists = await userExistsInRedis(userId);
+      if (!exists) {
+        console.log(`[Usage] User ${userId} not found in Redis, initializing as new user`);
+        await initializeNewUser(userId);
+        return 0; // New user starts with 0 used count
+      } else {
+        // User exists but usedCount is null (partial data), return 0
+        // This can happen if data is partially lost, but we don't want to re-initialize
+        console.warn(`[Usage] User ${userId} exists but usedCount is null, returning 0`);
+        return 0;
+      }
+    }
+
+    return parseInt(count, 10);
   } catch (error) {
     console.error(`[Usage] Error getting usage count for user ${userId}:`, error);
     // If Redis operation fails, return 0 to allow request to continue
     return 0;
+  }
+}
+
+/**
+ * Get user remaining count
+ * Always read directly from Redis, never calculate
+ * If user doesn't exist in Redis (all keys are null), initialize as new user with free usage limit
+ * If user exists but remainingCount is null, return 0 (data may be incomplete, but don't calculate)
+ *
+ * @param userId - User ID
+ * @returns Promise<number> - Current remaining count from Redis
+ */
+async function getUserRemainingCount(userId: string): Promise<number> {
+  try {
+    // Check Redis connection status
+    if (redis.status !== "ready") {
+      console.warn(
+        `[Usage] Redis not ready (status: ${redis.status}), returning ${FREE_USAGE_LIMIT}`,
+      );
+      return FREE_USAGE_LIMIT;
+    }
+    const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
+    const remainingCountStr = await redis.get(remainingCountKey);
+
+    // Only initialize new user if user doesn't exist at all (all keys are null)
+    // This prevents re-initializing users who have used up their free quota (remainingCount = 0)
+    if (remainingCountStr === null) {
+      const exists = await userExistsInRedis(userId);
+      if (!exists) {
+        console.log(`[Usage] User ${userId} not found in Redis, initializing as new user`);
+        await initializeNewUser(userId);
+        // After initialization, re-read from Redis
+        const newRemainingCountStr = await redis.get(remainingCountKey);
+        return newRemainingCountStr ? parseInt(newRemainingCountStr, 10) : FREE_USAGE_LIMIT;
+      } else {
+        // User exists but remainingCount is null (data may be incomplete)
+        // Return 0 instead of calculating, as remainingCount should always be stored in Redis
+        console.warn(
+          `[Usage] User ${userId} exists but remainingCount is null in Redis, returning 0`,
+        );
+        return 0;
+      }
+    }
+
+    // Always read directly from Redis, never calculate
+    return parseInt(remainingCountStr, 10);
+  } catch (error) {
+    console.error(`[Usage] Error getting remaining count for user ${userId}:`, error);
+    // If Redis operation fails, return FREE_USAGE_LIMIT to allow request to continue
+    return FREE_USAGE_LIMIT;
   }
 }
 
@@ -509,7 +665,11 @@ async function updateUsageValues(
 
     // Calculate values
     const totalFreeCount = FREE_USAGE_LIMIT + totalPaidCredits;
-    const remainingCount = Math.max(0, FREE_USAGE_LIMIT - usedCount);
+    // remainingCount should include both free and paid credits
+    // If usedCount is negative (user has paid credits), remainingCount will be positive
+    // Example: usedCount = -5, totalFreeCount = 15, remainingCount = 15 - (-5) = 20
+    // Example: usedCount = 5, totalFreeCount = 5, remainingCount = 5 - 5 = 0
+    const remainingCount = Math.max(0, totalFreeCount - usedCount);
 
     // Store all values in Redis permanently
     await redis.set(usedCountKey, usedCount.toString());
@@ -526,6 +686,7 @@ async function updateUsageValues(
 
 /**
  * Increment user usage count (for free usage)
+ * If user doesn't exist in Redis, initialize as new user first
  *
  * @param userId - User ID
  * @returns Promise<void>
@@ -540,19 +701,69 @@ async function incrementUserUsage(userId: string): Promise<void> {
 
     // Get current used count
     const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
-    const currentUsedCountStr = await redis.get(key);
+    let currentUsedCountStr = await redis.get(key);
+
+    // Only initialize new user if user doesn't exist at all (all keys are null)
+    // This prevents re-initializing users who have used up their free quota (remainingCount = 0)
+    if (currentUsedCountStr === null) {
+      const exists = await userExistsInRedis(userId);
+      if (!exists) {
+        console.log(
+          `[Usage] User ${userId} not found in Redis, initializing as new user before increment`,
+        );
+        await initializeNewUser(userId);
+        // Re-fetch after initialization
+        currentUsedCountStr = await redis.get(key);
+      } else {
+        // User exists but usedCount is null (partial data), treat as 0
+        // This can happen if data is partially lost, but we don't want to re-initialize
+        console.warn(`[Usage] User ${userId} exists but usedCount is null, treating as 0`);
+        currentUsedCountStr = "0";
+      }
+    }
+
+    // Get current used count (after potential initialization)
     const currentUsedCount = currentUsedCountStr ? parseInt(currentUsedCountStr, 10) : 0;
 
-    // Increment by 1
+    // Increment usedCount by 1 (consume 1 credit for this request)
     const newUsedCount = currentUsedCount + 1;
 
-    // Get total paid credits to update all values
-    const paidCreditsKey = `${USER_PAID_CREDITS_KEY_PREFIX}${userId}`;
-    const totalPaidCreditsStr = await redis.get(paidCreditsKey);
-    const totalPaidCredits = totalPaidCreditsStr ? parseInt(totalPaidCreditsStr, 10) : 0;
+    // Get current remainingCount from Redis and decrement by 1
+    // Use atomic operation to ensure only one decrement happens
+    const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
 
-    // Update all usage-related values (this will set usedCount, totalFreeCount, remainingCount)
-    await updateUsageValues(userId, newUsedCount, totalPaidCredits);
+    // Check if remainingCount exists, if not initialize user first
+    const remainingCountExists = await redis.exists(remainingCountKey);
+    if (!remainingCountExists) {
+      const exists = await userExistsInRedis(userId);
+      if (!exists) {
+        // New user, initialize with FREE_USAGE_LIMIT
+        await initializeNewUser(userId);
+      } else {
+        // User exists but remainingCount is null, set to 0
+        await redis.set(remainingCountKey, "0");
+      }
+    }
+
+    // Use Redis DECRBY to atomically decrement by 1, then get the result
+    // This ensures only one decrement happens even if function is called multiple times
+    const newRemainingCount = await redis.decrby(remainingCountKey, 1);
+
+    // If result is negative, set it back to 0
+    const finalRemainingCount = Math.max(0, newRemainingCount);
+    if (newRemainingCount < 0) {
+      await redis.set(remainingCountKey, "0");
+    }
+
+    // Get the original remainingCount before decrement for logging
+    const currentRemainingCount = finalRemainingCount + 1;
+
+    console.log(
+      `[Usage] Incrementing usage - usedCount: ${currentUsedCount} -> ${newUsedCount}, remainingCount: ${currentRemainingCount} -> ${finalRemainingCount} (atomic decrement)`,
+    );
+
+    // Update usedCount in Redis
+    await redis.set(key, newUsedCount.toString());
 
     console.log(`[Usage] User ${userId} usage count: ${currentUsedCount} -> ${newUsedCount}`);
   } catch (error) {
@@ -609,35 +820,45 @@ async function addUsageCreditsFromPayment(
     console.log(`[Usage] Rounded credits to add: ${creditsToAddInt}`);
 
     if (creditsToAddInt > 0) {
-      const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
+      const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
+      const totalFreeCountKey = `${USER_TOTAL_FREE_COUNT_KEY_PREFIX}${userId}`;
       const paidCreditsKey = `${USER_PAID_CREDITS_KEY_PREFIX}${userId}`;
 
-      // Decrease usage count by credits (unified calculation, no distinction between free and paid)
-      // Negative values indicate remaining paid credits beyond the free limit
-      // Example: If usedCount = 5 and user pays for 10 credits, newCount = 5 - 10 = -5
-      // This means user has 5 free + 10 paid = 15 total credits remaining
-      const currentCount = await getUserUsageCount(userId);
-      console.log(`[Usage] Current usage count: ${currentCount}`);
-      const newCount = currentCount - creditsToAddInt; // Allow negative values for paid credits
-      console.log(`[Usage] New usage count after adding credits: ${newCount}`);
+      // Read current values from Redis
+      const currentRemainingCountStr = await redis.get(remainingCountKey);
+      const currentTotalFreeCountStr = await redis.get(totalFreeCountKey);
+      const currentPaidCreditsStr = await redis.get(paidCreditsKey);
 
-      // Get current paid credits and calculate new total
-      const currentPaidCredits = await redis.get(paidCreditsKey);
-      const currentPaidCreditsInt = currentPaidCredits ? parseInt(currentPaidCredits, 10) : 0;
-      const newPaidCredits = currentPaidCreditsInt + creditsToAddInt;
-      console.log(`[Usage] Total paid credits: ${newPaidCredits} (added ${creditsToAddInt})`);
+      // Get current values (default to 0 if null)
+      const currentRemainingCount = currentRemainingCountStr
+        ? parseInt(currentRemainingCountStr, 10)
+        : 0;
+      const currentTotalFreeCount = currentTotalFreeCountStr
+        ? parseInt(currentTotalFreeCountStr, 10)
+        : FREE_USAGE_LIMIT;
+      const currentPaidCredits = currentPaidCreditsStr ? parseInt(currentPaidCreditsStr, 10) : 0;
 
-      // Update all usage-related values (usedCount, totalFreeCount, remainingCount) in Redis
-      // This will store usedCount, totalFreeCount, and remainingCount permanently
-      await updateUsageValues(userId, newCount, newPaidCredits);
+      // Update values directly (no calculation)
+      // remainingCount: directly add credits
+      const newRemainingCount = currentRemainingCount + creditsToAddInt;
+      // totalFreeCount: add credits
+      const newTotalFreeCount = currentTotalFreeCount + creditsToAddInt;
+      // paidCredits: add credits
+      const newPaidCredits = currentPaidCredits + creditsToAddInt;
 
-      // Also store paid credits separately for reference
+      console.log(
+        `[Usage] Payment credits: ${creditsToAddInt}, remainingCount: ${currentRemainingCount} -> ${newRemainingCount}, totalFreeCount: ${currentTotalFreeCount} -> ${newTotalFreeCount}, paidCredits: ${currentPaidCredits} -> ${newPaidCredits}`,
+      );
+
+      // Store all values in Redis
+      await redis.set(remainingCountKey, newRemainingCount.toString());
+      await redis.set(totalFreeCountKey, newTotalFreeCount.toString());
       await redis.set(paidCreditsKey, newPaidCredits.toString());
 
       // Calculate USDC amount for logging (atomic units / 1,000,000)
       const paymentAmountUSDC = Number(paymentAmountAtomicBigInt) / 1_000_000;
       console.log(
-        `[Usage] User ${userId} added ${creditsToAddInt} credits from payment ${paymentAmountAtomic} atomic units (${paymentAmountUSDC} USDC). New usage count: ${newCount}`,
+        `[Usage] User ${userId} added ${creditsToAddInt} credits from payment ${paymentAmountAtomic} atomic units (${paymentAmountUSDC} USDC). New remainingCount: ${newRemainingCount}`,
       );
     }
   } catch (error) {
@@ -967,79 +1188,101 @@ async function proxyPost(
       headers: proxyHeaders,
     };
 
-    // Create the proxy request
-    const proxyReq = httpModule.request(requestOptions, proxyRes => {
-      // Collect response data
-      let responseData = Buffer.alloc(0);
+    // Create a Promise that resolves when the response is successfully sent
+    return new Promise<void>((resolve, reject) => {
+      // Create the proxy request
+      const proxyReq = httpModule.request(requestOptions, proxyRes => {
+        // Collect response data
+        let responseData = Buffer.alloc(0);
 
-      // Set status code
-      res.status(proxyRes.statusCode || 200);
+        // Set status code
+        res.status(proxyRes.statusCode || 200);
 
-      // Forward response headers (except those we've already set)
-      Object.keys(proxyRes.headers).forEach(key => {
-        const lowerKey = key.toLowerCase();
-        if (
-          lowerKey !== "content-encoding" &&
-          lowerKey !== "content-length" &&
-          lowerKey !== "transfer-encoding"
-        ) {
-          res.setHeader(key, proxyRes.headers[key]!);
-        }
-      });
-
-      // Collect response chunks
-      proxyRes.on("data", chunk => {
-        responseData = Buffer.concat([responseData, chunk]);
-      });
-
-      proxyRes.on("end", () => {
-        if (!res.headersSent) {
-          // Set Content-Type if not already set
-          if (!res.getHeader("Content-Type")) {
-            res.setHeader("Content-Type", "application/json");
+        // Forward response headers (except those we've already set)
+        Object.keys(proxyRes.headers).forEach(key => {
+          const lowerKey = key.toLowerCase();
+          if (
+            lowerKey !== "content-encoding" &&
+            lowerKey !== "content-length" &&
+            lowerKey !== "transfer-encoding"
+          ) {
+            res.setHeader(key, proxyRes.headers[key]!);
           }
-          // Send the complete response
-          res.send(responseData);
-        }
+        });
+
+        // Collect response chunks
+        proxyRes.on("data", chunk => {
+          responseData = Buffer.concat([responseData, chunk]);
+        });
+
+        proxyRes.on("end", () => {
+          if (!res.headersSent) {
+            // Set Content-Type if not already set
+            if (!res.getHeader("Content-Type")) {
+              res.setHeader("Content-Type", "application/json");
+            }
+            // Send the complete response
+            res.send(responseData);
+            // Wait for response to finish sending before resolving
+            res.once("finish", () => {
+              console.log("[Proxy] Response sent successfully");
+              resolve();
+            });
+          } else {
+            // Response headers already sent, resolve immediately
+            console.log("[Proxy] Response already sent, resolving");
+            resolve();
+          }
+        });
+
+        proxyRes.on("error", error => {
+          console.error("[Proxy] Response error:", error);
+          if (!res.headersSent) {
+            res.status(500).json({ error: "Proxy response error", message: error.message });
+            res.once("finish", () => {
+              reject(error);
+            });
+          } else {
+            reject(error);
+          }
+        });
       });
 
-      proxyRes.on("error", error => {
-        console.error("[Proxy] Response error:", error);
+      // Handle proxy request errors
+      proxyReq.on("error", error => {
+        console.error(`[Proxy] Request error (${requestMethod} ${targetUrl.toString()}):`, error);
         if (!res.headersSent) {
-          res.status(500).json({ error: "Proxy response error", message: error.message });
+          res.status(502).json({ error: "Proxy request failed", message: error.message });
+          res.once("finish", () => {
+            reject(error);
+          });
+        } else {
+          reject(error);
         }
       });
-    });
 
-    // Handle proxy request errors
-    proxyReq.on("error", error => {
-      console.error(`[Proxy] Request error (${requestMethod} ${targetUrl.toString()}):`, error);
-      if (!res.headersSent) {
-        res.status(502).json({ error: "Proxy request failed", message: error.message });
+      // Send request body for POST requests
+      if (requestBody) {
+        console.log(
+          `[Proxy] Sending request body: ${Buffer.byteLength(requestBody)} bytes, Content-Type: ${proxyHeaders["Content-Type"]}`,
+        );
+        proxyReq.write(requestBody);
+        proxyReq.end();
+      } else {
+        console.log(
+          `[Proxy] Sending empty POST request, Content-Length: ${proxyHeaders["Content-Length"]}`,
+        );
+        proxyReq.end();
       }
-    });
 
-    // Send request body for POST requests
-    if (requestBody) {
-      console.log(
-        `[Proxy] Sending request body: ${Buffer.byteLength(requestBody)} bytes, Content-Type: ${proxyHeaders["Content-Type"]}`,
-      );
-      proxyReq.write(requestBody);
-      proxyReq.end();
-    } else {
-      console.log(
-        `[Proxy] Sending empty POST request, Content-Length: ${proxyHeaders["Content-Length"]}`,
-      );
-      proxyReq.end();
-    }
+      // Handle client disconnect
+      req.on("close", () => {
+        proxyReq.destroy();
+      });
 
-    // Handle client disconnect
-    req.on("close", () => {
-      proxyReq.destroy();
-    });
-
-    res.on("close", () => {
-      proxyReq.destroy();
+      res.on("close", () => {
+        proxyReq.destroy();
+      });
     });
   } catch (error) {
     console.error("[Proxy] Error:", error);
@@ -1049,6 +1292,7 @@ async function proxyPost(
         message: error instanceof Error ? error.message : String(error),
       });
     }
+    throw error; // Re-throw to be caught by caller
   }
 }
 
@@ -1110,99 +1354,147 @@ async function handleGenerate(req: express.Request, res: express.Response) {
   const { userId } = userInfo;
   console.log(`[Generate] User authenticated: ${userId}`);
 
-  // 3. Check user usage count
+  // 3. Check user remaining count from Redis
+  // Always read remainingCount directly from Redis, never calculate
+  // If remainingCount <= 0, user has used up all free usage and needs to pay
+  const remainingCount = await getUserRemainingCount(userId); // Reads directly from Redis
+  const requiresPayment = remainingCount <= 0;
+
+  // Also get usageCount for logging (not used for payment decision)
   const usageCount = await getUserUsageCount(userId);
-  const requiresPayment = usageCount >= FREE_USAGE_LIMIT;
 
   console.log(
-    `[Generate] User ${userId} usage: ${usageCount}/${FREE_USAGE_LIMIT}, requiresPayment: ${requiresPayment}`,
+    `[Generate] User ${userId} remainingCount (from Redis): ${remainingCount}, usageCount: ${usageCount}/${FREE_USAGE_LIMIT}, requiresPayment: ${requiresPayment}`,
   );
 
-  // 4. If free usage limit exceeded, require x402 payment
-  let paymentProcessed = false;
-  let paymentAmountAtomic: string | null = null;
+  // 4. Prepare payment requirements (used for both GET and POST)
+  const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
+  const paymentRequirements = [
+    createExactPaymentRequirements("$0.01", "base-sepolia", resource, "Access to chat API"),
+  ];
 
-  if (requiresPayment) {
-    const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
-    const paymentRequirements = [
-      createExactPaymentRequirements("$0.01", "base-sepolia", resource, "Access to chat API"),
-    ];
+  // 5. Handle GET requests - only verify payment requirements, don't execute inference
+  if (req.method === "GET") {
+    console.log(`[Generate] GET request - verifying payment requirements only`);
 
-    const isValid = await verifyPayment(req, res, paymentRequirements);
-    if (!isValid) {
-      console.log(`[Generate] Payment verification failed for user ${userId}`);
-      return;
-    }
+    if (requiresPayment) {
+      // Check if payment header is provided
+      const paymentHeader = req.header("X-PAYMENT") || req.header("x-payment");
 
-    // Process payment settlement
-    try {
-      const paymentHeader = req.header("X-PAYMENT");
-      if (paymentHeader) {
-        const decodedPayment = exact.evm.decodePayment(paymentHeader);
-
-        // Extract payment amount from decoded payment
-        // The payment amount is in the authorization.value field (atomic units)
-        // Check if it's an EVM payload (has authorization field)
-        if (
-          decodedPayment.payload &&
-          "authorization" in decodedPayment.payload &&
-          decodedPayment.payload.authorization?.value
-        ) {
-          paymentAmountAtomic = decodedPayment.payload.authorization.value;
-          console.log(
-            `[Generate] Payment amount from authorization: ${paymentAmountAtomic} atomic units`,
-          );
-        } else {
-          // Fallback: use maxAmountRequired from payment requirements
-          // For exact scheme, user pays exactly maxAmountRequired
-          paymentAmountAtomic = paymentRequirements[0].maxAmountRequired;
-          console.log(
-            `[Generate] Payment amount from requirements: ${paymentAmountAtomic} atomic units`,
-          );
-        }
-
-        const settleResponse = await settle(decodedPayment, paymentRequirements[0]);
-        const responseHeader = settleResponseHeader(settleResponse);
-        res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
-        console.log("[Proxy] Payment settled successfully");
-        paymentProcessed = true;
-
-        // Add usage credits based on payment amount
-        // Use paymentAmountAtomic or fallback to maxAmountRequired
-        const amountToUse = paymentAmountAtomic || paymentRequirements[0].maxAmountRequired;
-        if (amountToUse) {
-          console.log(`[Generate] Adding credits for payment amount: ${amountToUse} atomic units`);
-          await addUsageCreditsFromPayment(userId, amountToUse);
-        } else {
-          console.warn(`[Generate] No payment amount found, cannot add credits`);
-        }
+      if (!paymentHeader) {
+        // No payment header, return payment requirements
+        console.log(`[Generate] GET request - payment required but no X-PAYMENT header`);
+        res.status(402).json({
+          x402Version,
+          error: "Payment required",
+          accepts: paymentRequirements,
+          requiresPayment: true,
+          remainingCount: remainingCount,
+        });
+        return;
       }
-    } catch (error) {
-      console.error("[Proxy] Payment settlement failed:", error);
-      res.status(402).json({
-        x402Version,
-        error: "Payment settlement failed",
-        accepts: paymentRequirements,
+
+      // Payment header provided, verify it
+      const isValid = await verifyPayment(req, res, paymentRequirements);
+      if (!isValid) {
+        console.log(`[Generate] GET request - payment verification failed`);
+        return;
+      }
+
+      // Payment verified successfully
+      console.log(`[Generate] GET request - payment verified successfully`);
+      res.status(200).json({
+        success: true,
+        message: "Payment verified",
+        requiresPayment: true,
+        remainingCount: remainingCount,
+      });
+      return;
+    } else {
+      // No payment required
+      console.log(`[Generate] GET request - no payment required`);
+      res.status(200).json({
+        success: true,
+        message: "No payment required",
+        requiresPayment: false,
+        remainingCount: remainingCount,
       });
       return;
     }
   }
 
-  // 5. Increment user usage count (consume 1 credit for this request)
-  // This happens regardless of whether payment was made or not
-  // If payment was made, credits were already added above, so this just consumes 1 credit
-  await incrementUserUsage(userId);
+  // 6. Handle POST requests - verify payment (if needed) and execute inference
+  if (req.method === "POST") {
+    console.log(`[Generate] POST request - will execute inference after payment verification`);
 
-  // 6. For GET requests, convert query parameters to body
-  // For POST requests, ensure body is properly handled
-  if (req.method === "GET" && Object.keys(req.query).length > 0) {
-    // Convert query parameters to body for GET requests
-    req.body = req.query;
-    console.log("[Generate] GET request - converted query params to body:", req.body);
-  } else if (req.method === "POST") {
-    // For POST requests, ensure body is available
-    // If body is undefined or null, it means it wasn't parsed by middleware
-    // In that case, we need to check if there's a raw body available
+    // If free usage limit exceeded, require x402 payment
+    let paymentProcessed = false;
+    let paymentAmountAtomic: string | null = null;
+
+    if (requiresPayment) {
+      const isValid = await verifyPayment(req, res, paymentRequirements);
+      if (!isValid) {
+        console.log(`[Generate] Payment verification failed for user ${userId}`);
+        return;
+      }
+
+      // Process payment settlement
+      try {
+        const paymentHeader = req.header("X-PAYMENT");
+        if (paymentHeader) {
+          const decodedPayment = exact.evm.decodePayment(paymentHeader);
+
+          // Extract payment amount from decoded payment
+          // The payment amount is in the authorization.value field (atomic units)
+          // Check if it's an EVM payload (has authorization field)
+          if (
+            decodedPayment.payload &&
+            "authorization" in decodedPayment.payload &&
+            decodedPayment.payload.authorization?.value
+          ) {
+            paymentAmountAtomic = decodedPayment.payload.authorization.value;
+            console.log(
+              `[Generate] Payment amount from authorization: ${paymentAmountAtomic} atomic units`,
+            );
+          } else {
+            // Fallback: use maxAmountRequired from payment requirements
+            // For exact scheme, user pays exactly maxAmountRequired
+            paymentAmountAtomic = paymentRequirements[0].maxAmountRequired;
+            console.log(
+              `[Generate] Payment amount from requirements: ${paymentAmountAtomic} atomic units`,
+            );
+          }
+
+          const settleResponse = await settle(decodedPayment, paymentRequirements[0]);
+          const responseHeader = settleResponseHeader(settleResponse);
+          res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
+          console.log("[Proxy] Payment settled successfully");
+          paymentProcessed = true;
+
+          // Add usage credits based on payment amount
+          // Use paymentAmountAtomic or fallback to maxAmountRequired
+          const amountToUse = paymentAmountAtomic || paymentRequirements[0].maxAmountRequired;
+          if (amountToUse) {
+            console.log(
+              `[Generate] Adding credits for payment amount: ${amountToUse} atomic units`,
+            );
+            await addUsageCreditsFromPayment(userId, amountToUse);
+          } else {
+            console.warn(`[Generate] No payment amount found, cannot add credits`);
+          }
+        }
+      } catch (error) {
+        console.error("[Proxy] Payment settlement failed:", error);
+        res.status(402).json({
+          x402Version,
+          error: "Payment settlement failed",
+          accepts: paymentRequirements,
+        });
+        return;
+      }
+    }
+
+    // Ensure body is properly handled for POST requests
     if (req.body === undefined || req.body === null) {
       console.warn("[Generate] POST request body is undefined or null, checking for raw body");
       // Check if body was captured by express.raw() middleware
@@ -1217,17 +1509,47 @@ async function handleGenerate(req: express.Request, res: express.Response) {
     } else {
       console.log("[Generate] POST request body is available:", typeof req.body, req.body);
     }
-  }
 
-  if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
-  }
-  if (Buffer.isBuffer(req.body)) {
-    console.log("Request Body (Buffer):", req.body.length, "bytes");
-  }
-  console.log("=== End Request Parameters ===");
+    if (req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body)) {
+    }
+    if (Buffer.isBuffer(req.body)) {
+      console.log("Request Body (Buffer):", req.body.length, "bytes");
+    }
+    console.log("=== End Request Parameters ===");
 
-  // 7. Proxy the POST request
-  await proxyPost(req, res, "/mgn/agent/syncChat");
+    // 7. Proxy the POST request (execute inference)
+    // Only deduct usage count after inference is successfully completed
+    // Use a flag to prevent double deduction
+    let usageDeducted = false;
+    try {
+      // proxyPost now returns a Promise that resolves when response is successfully sent
+      await proxyPost(req, res, "/mgn/agent/syncChat");
+
+      // 8. Increment user usage count (consume 1 credit for this request)
+      // Only deduct after inference is successfully completed and response is sent
+      // This happens regardless of whether payment was made or not
+      // If payment was made, credits were already added above, so this just consumes 1 credit
+      // Use flag to prevent double deduction
+      if (!usageDeducted && res.headersSent) {
+        console.log("[Generate] Inference completed successfully, deducting usage count");
+        usageDeducted = true;
+        await incrementUserUsage(userId);
+      } else {
+        console.warn(
+          `[Generate] Skipping usage deduction - usageDeducted: ${usageDeducted}, headersSent: ${res.headersSent}`,
+        );
+      }
+    } catch (error) {
+      console.error("[Generate] Inference failed:", error);
+      // Don't deduct usage count if inference failed
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: "Inference failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
 }
 
 // Add a catch-all 404 handler for debugging (after all routes)
