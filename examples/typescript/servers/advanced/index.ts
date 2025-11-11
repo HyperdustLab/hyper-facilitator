@@ -50,8 +50,23 @@ redis.on("connect", () => {
   console.log("[Redis] Connected successfully");
 });
 
+redis.on("ready", () => {
+  console.log("[Redis] Ready to accept commands");
+});
+
+redis.on("close", () => {
+  console.warn("[Redis] Connection closed");
+});
+
+redis.on("reconnecting", () => {
+  console.log("[Redis] Reconnecting...");
+});
+
 const FREE_USAGE_LIMIT = 5;
 const USER_USAGE_KEY_PREFIX = "user:usage:";
+const USER_PAID_CREDITS_KEY_PREFIX = "user:paid_credits:";
+const USER_TOTAL_FREE_COUNT_KEY_PREFIX = "user:total_free_count:";
+const USER_REMAINING_COUNT_KEY_PREFIX = "user:remaining_count:";
 
 const app = express();
 
@@ -213,19 +228,44 @@ app.get("/usage", async (req, res) => {
     const { userId } = userInfo;
     console.log(`[Usage] User authenticated: ${userId}`);
 
-    // 3. Get user usage count
-    const usedCount = await getUserUsageCount(userId);
+    // 3. Get all usage values from Redis
+    let usedCount = 0;
+    let totalFreeCount = FREE_USAGE_LIMIT;
+    let remainingCount = FREE_USAGE_LIMIT;
 
-    // 4. Calculate remaining count
-    const remainingCount = Math.max(0, FREE_USAGE_LIMIT - usedCount);
+    try {
+      if (redis.status === "ready") {
+        const usedCountKey = `${USER_USAGE_KEY_PREFIX}${userId}`;
+        const totalFreeCountKey = `${USER_TOTAL_FREE_COUNT_KEY_PREFIX}${userId}`;
+        const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
 
-    // 5. Return result
+        // Get values from Redis
+        const usedCountStr = await redis.get(usedCountKey);
+        const totalFreeCountStr = await redis.get(totalFreeCountKey);
+        const remainingCountStr = await redis.get(remainingCountKey);
+
+        usedCount = usedCountStr ? parseInt(usedCountStr, 10) : 0;
+        totalFreeCount = totalFreeCountStr ? parseInt(totalFreeCountStr, 10) : FREE_USAGE_LIMIT;
+        remainingCount = remainingCountStr ? parseInt(remainingCountStr, 10) : FREE_USAGE_LIMIT;
+
+        console.log(
+          `[Usage] Retrieved from Redis - usedCount: ${usedCount}, totalFreeCount: ${totalFreeCount}, remainingCount: ${remainingCount}`,
+        );
+      } else {
+        console.warn(`[Usage] Redis not ready (status: ${redis.status}), using default values`);
+      }
+    } catch (error) {
+      console.error(`[Usage] Error getting usage values for user ${userId}:`, error);
+      // Use default values on error
+    }
+
+    // 7. Return result (keep original fields only, unified calculation)
     res.json({
       success: true,
       data: {
-        totalFreeCount: FREE_USAGE_LIMIT,
-        usedCount: usedCount,
-        remainingCount: remainingCount,
+        totalFreeCount: totalFreeCount, // Includes both free and paid credits
+        usedCount: Math.max(0, usedCount), // Show 0 if negative (has paid credits)
+        remainingCount: remainingCount, // Includes both free and paid credits
       },
     });
   } catch (error) {
@@ -274,8 +314,11 @@ function createExactPaymentRequirements(
         ? {
             name: asset.eip712.name,
             version: asset.eip712.version,
+            decimals: asset.decimals,
           }
-        : undefined,
+        : {
+            decimals: asset.decimals,
+          },
   };
 }
 
@@ -441,7 +484,48 @@ async function getUserUsageCount(userId: string): Promise<number> {
 }
 
 /**
- * Increment user usage count
+ * Update all usage-related values in Redis
+ * Stores usedCount, totalFreeCount, and remainingCount
+ *
+ * @param userId - User ID
+ * @param usedCount - Current used count (can be negative)
+ * @param totalPaidCredits - Total paid credits (cumulative)
+ * @returns Promise<void>
+ */
+async function updateUsageValues(
+  userId: string,
+  usedCount: number,
+  totalPaidCredits: number,
+): Promise<void> {
+  try {
+    if (redis.status !== "ready") {
+      console.warn(`[Usage] Redis not ready (status: ${redis.status}), skipping update`);
+      return;
+    }
+
+    const usedCountKey = `${USER_USAGE_KEY_PREFIX}${userId}`;
+    const totalFreeCountKey = `${USER_TOTAL_FREE_COUNT_KEY_PREFIX}${userId}`;
+    const remainingCountKey = `${USER_REMAINING_COUNT_KEY_PREFIX}${userId}`;
+
+    // Calculate values
+    const totalFreeCount = FREE_USAGE_LIMIT + totalPaidCredits;
+    const remainingCount = Math.max(0, FREE_USAGE_LIMIT - usedCount);
+
+    // Store all values in Redis permanently
+    await redis.set(usedCountKey, usedCount.toString());
+    await redis.set(totalFreeCountKey, totalFreeCount.toString());
+    await redis.set(remainingCountKey, remainingCount.toString());
+
+    console.log(
+      `[Usage] Updated values for user ${userId}: usedCount=${usedCount}, totalFreeCount=${totalFreeCount}, remainingCount=${remainingCount}`,
+    );
+  } catch (error) {
+    console.error(`[Usage] Error updating usage values for user ${userId}:`, error);
+  }
+}
+
+/**
+ * Increment user usage count (for free usage)
  *
  * @param userId - User ID
  * @returns Promise<void>
@@ -453,19 +537,112 @@ async function incrementUserUsage(userId: string): Promise<void> {
       console.warn(`[Usage] Redis not ready (status: ${redis.status}), skipping usage increment`);
       return;
     }
+
+    // Get current used count
     const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
-    const count = await redis.incr(key);
+    const currentUsedCountStr = await redis.get(key);
+    const currentUsedCount = currentUsedCountStr ? parseInt(currentUsedCountStr, 10) : 0;
 
-    // Set expiration time to 30 days (optional, adjust according to business requirements)
-    if (count === 1) {
-      await redis.expire(key, 30 * 24 * 60 * 60);
-    }
+    // Increment by 1
+    const newUsedCount = currentUsedCount + 1;
 
-    console.log(`[Usage] User ${userId} usage count: ${count}`);
+    // Get total paid credits to update all values
+    const paidCreditsKey = `${USER_PAID_CREDITS_KEY_PREFIX}${userId}`;
+    const totalPaidCreditsStr = await redis.get(paidCreditsKey);
+    const totalPaidCredits = totalPaidCreditsStr ? parseInt(totalPaidCreditsStr, 10) : 0;
+
+    // Update all usage-related values (this will set usedCount, totalFreeCount, remainingCount)
+    await updateUsageValues(userId, newUsedCount, totalPaidCredits);
+
+    console.log(`[Usage] User ${userId} usage count: ${currentUsedCount} -> ${newUsedCount}`);
   } catch (error) {
     console.error(`[Usage] Error incrementing usage for user ${userId}:`, error);
     // Don't throw error, allow request to continue processing even if Redis operation fails
     // In production environment, you may need to decide whether to throw error based on business requirements
+  }
+}
+
+/**
+ * Add usage credits based on payment amount
+ * Payment: 0.01 USDC = 10 usage credits
+ * USDC uses 6 decimals, so 0.01 USDC = 10000 atomic units = 10 credits
+ *
+ * Note: Unified calculation - no distinction between free and paid credits
+ * Negative usedCount values indicate remaining paid credits beyond the free limit
+ *
+ * @param userId - User ID
+ * @param paymentAmountAtomic - Payment amount in atomic units (USDC has 6 decimals)
+ * @returns Promise<void>
+ */
+async function addUsageCreditsFromPayment(
+  userId: string,
+  paymentAmountAtomic: string,
+): Promise<void> {
+  try {
+    // Check Redis connection status
+    if (redis.status !== "ready") {
+      console.warn(
+        `[Usage] Redis not ready (status: ${redis.status}), skipping usage credit addition`,
+      );
+      return;
+    }
+
+    // Calculate usage credits: 0.01 USDC = 10 credits
+    // USDC has 6 decimals, so:
+    // - 0.01 USDC = 10000 atomic units = 10 credits
+    // - 1 credit = 1000 atomic units = 0.001 USDC
+    // So credits = paymentAmountAtomic / 1000
+    console.log(`[Usage] Processing payment: ${paymentAmountAtomic} atomic units`);
+    const paymentAmountAtomicBigInt = BigInt(paymentAmountAtomic);
+    const creditsToAdd = Number(paymentAmountAtomicBigInt) / 1000;
+    console.log(`[Usage] Calculated credits to add: ${creditsToAdd}`);
+
+    if (creditsToAdd <= 0) {
+      console.warn(
+        `[Usage] Invalid payment amount: ${paymentAmountAtomic}, credits: ${creditsToAdd}`,
+      );
+      return;
+    }
+
+    // Round down to integer credits
+    const creditsToAddInt = Math.floor(creditsToAdd);
+    console.log(`[Usage] Rounded credits to add: ${creditsToAddInt}`);
+
+    if (creditsToAddInt > 0) {
+      const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
+      const paidCreditsKey = `${USER_PAID_CREDITS_KEY_PREFIX}${userId}`;
+
+      // Decrease usage count by credits (unified calculation, no distinction between free and paid)
+      // Negative values indicate remaining paid credits beyond the free limit
+      // Example: If usedCount = 5 and user pays for 10 credits, newCount = 5 - 10 = -5
+      // This means user has 5 free + 10 paid = 15 total credits remaining
+      const currentCount = await getUserUsageCount(userId);
+      console.log(`[Usage] Current usage count: ${currentCount}`);
+      const newCount = currentCount - creditsToAddInt; // Allow negative values for paid credits
+      console.log(`[Usage] New usage count after adding credits: ${newCount}`);
+
+      // Get current paid credits and calculate new total
+      const currentPaidCredits = await redis.get(paidCreditsKey);
+      const currentPaidCreditsInt = currentPaidCredits ? parseInt(currentPaidCredits, 10) : 0;
+      const newPaidCredits = currentPaidCreditsInt + creditsToAddInt;
+      console.log(`[Usage] Total paid credits: ${newPaidCredits} (added ${creditsToAddInt})`);
+
+      // Update all usage-related values (usedCount, totalFreeCount, remainingCount) in Redis
+      // This will store usedCount, totalFreeCount, and remainingCount permanently
+      await updateUsageValues(userId, newCount, newPaidCredits);
+
+      // Also store paid credits separately for reference
+      await redis.set(paidCreditsKey, newPaidCredits.toString());
+
+      // Calculate USDC amount for logging (atomic units / 1,000,000)
+      const paymentAmountUSDC = Number(paymentAmountAtomicBigInt) / 1_000_000;
+      console.log(
+        `[Usage] User ${userId} added ${creditsToAddInt} credits from payment ${paymentAmountAtomic} atomic units (${paymentAmountUSDC} USDC). New usage count: ${newCount}`,
+      );
+    }
+  } catch (error) {
+    console.error(`[Usage] Error adding usage credits for user ${userId}:`, error);
+    // Don't throw error, allow request to continue processing even if Redis operation fails
   }
 }
 
@@ -942,10 +1119,13 @@ async function handleGenerate(req: express.Request, res: express.Response) {
   );
 
   // 4. If free usage limit exceeded, require x402 payment
+  let paymentProcessed = false;
+  let paymentAmountAtomic: string | null = null;
+
   if (requiresPayment) {
     const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
     const paymentRequirements = [
-      createExactPaymentRequirements("$0.001", "base-sepolia", resource, "Access to chat API"),
+      createExactPaymentRequirements("$0.01", "base-sepolia", resource, "Access to chat API"),
     ];
 
     const isValid = await verifyPayment(req, res, paymentRequirements);
@@ -959,10 +1139,43 @@ async function handleGenerate(req: express.Request, res: express.Response) {
       const paymentHeader = req.header("X-PAYMENT");
       if (paymentHeader) {
         const decodedPayment = exact.evm.decodePayment(paymentHeader);
+
+        // Extract payment amount from decoded payment
+        // The payment amount is in the authorization.value field (atomic units)
+        // Check if it's an EVM payload (has authorization field)
+        if (
+          decodedPayment.payload &&
+          "authorization" in decodedPayment.payload &&
+          decodedPayment.payload.authorization?.value
+        ) {
+          paymentAmountAtomic = decodedPayment.payload.authorization.value;
+          console.log(
+            `[Generate] Payment amount from authorization: ${paymentAmountAtomic} atomic units`,
+          );
+        } else {
+          // Fallback: use maxAmountRequired from payment requirements
+          // For exact scheme, user pays exactly maxAmountRequired
+          paymentAmountAtomic = paymentRequirements[0].maxAmountRequired;
+          console.log(
+            `[Generate] Payment amount from requirements: ${paymentAmountAtomic} atomic units`,
+          );
+        }
+
         const settleResponse = await settle(decodedPayment, paymentRequirements[0]);
         const responseHeader = settleResponseHeader(settleResponse);
         res.setHeader("X-PAYMENT-RESPONSE", responseHeader);
         console.log("[Proxy] Payment settled successfully");
+        paymentProcessed = true;
+
+        // Add usage credits based on payment amount
+        // Use paymentAmountAtomic or fallback to maxAmountRequired
+        const amountToUse = paymentAmountAtomic || paymentRequirements[0].maxAmountRequired;
+        if (amountToUse) {
+          console.log(`[Generate] Adding credits for payment amount: ${amountToUse} atomic units`);
+          await addUsageCreditsFromPayment(userId, amountToUse);
+        } else {
+          console.warn(`[Generate] No payment amount found, cannot add credits`);
+        }
       }
     } catch (error) {
       console.error("[Proxy] Payment settlement failed:", error);
@@ -975,7 +1188,9 @@ async function handleGenerate(req: express.Request, res: express.Response) {
     }
   }
 
-  // 5. Increment user usage count
+  // 5. Increment user usage count (consume 1 credit for this request)
+  // This happens regardless of whether payment was made or not
+  // If payment was made, credits were already added above, so this just consumes 1 credit
   await incrementUserUsage(userId);
 
   // 6. For GET requests, convert query parameters to body
@@ -1029,10 +1244,28 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
   });
 });
 
-app.listen(4021, () => {
+app.listen(4021, async () => {
   console.log(`Server listening at http://localhost:4021`);
   console.log(`CORS enabled for all origins`);
   console.log(`Proxy target URL: ${proxyTargetUrl}`);
+  console.log(`Redis URL: ${redisUrl}`);
+  console.log(`Redis status: ${redis.status}`);
+
+  // Check Redis connection status
+  try {
+    if (redis.status === "ready") {
+      console.log(`[Redis] Connection is ready`);
+      // Test Redis connection with a ping
+      const pong = await redis.ping();
+      console.log(`[Redis] Ping response: ${pong}`);
+    } else {
+      console.warn(`[Redis] Connection is not ready, status: ${redis.status}`);
+      console.warn(`[Redis] Data may not persist until connection is established`);
+    }
+  } catch (error) {
+    console.error(`[Redis] Error checking connection:`, error);
+  }
+
   console.log(`Available endpoints:`);
   console.log(`  GET /health`);
   console.log(`  GET /usage (Get user free inference usage)`);
