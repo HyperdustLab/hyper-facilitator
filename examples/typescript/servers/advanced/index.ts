@@ -30,16 +30,16 @@ if (!facilitatorUrl || !payTo) {
   process.exit(1);
 }
 
-// Redis 客户端初始化
+// Initialize Redis client
 const redis = new Redis(redisUrl, {
   retryStrategy: (times: number) => {
     const delay = Math.min(times * 50, 2000);
     return delay;
   },
-  maxRetriesPerRequest: 5, // 增加重试次数从 3 到 5
-  enableReadyCheck: true, // 启用就绪检查
-  connectTimeout: 10000, // 连接超时时间（毫秒）
-  lazyConnect: false, // 立即连接
+  maxRetriesPerRequest: 5, // Increase retry count from 3 to 5
+  enableReadyCheck: true, // Enable ready check
+  connectTimeout: 10000, // Connection timeout in milliseconds
+  lazyConnect: false, // Connect immediately
 });
 
 redis.on("error", (err: Error) => {
@@ -167,6 +167,74 @@ console.log("[Server] /generate route registered early (supports GET, POST, and 
 // Simple CORS test endpoint (for debugging)
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Get user free inference usage information endpoint
+app.get("/usage", async (req, res) => {
+  // Set CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, X-PAYMENT, Authorization, Cache-Control, x-access-token, X-Access-Token",
+  );
+  res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
+
+  // Handle OPTIONS preflight request
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
+  try {
+    // 1. Get x-access-token from request headers
+    const accessTokenRaw = req.header("x-access-token") || req.headers["x-access-token"];
+    const finalAccessToken = Array.isArray(accessTokenRaw) ? accessTokenRaw[0] : accessTokenRaw;
+
+    if (
+      !finalAccessToken ||
+      (typeof finalAccessToken === "string" && finalAccessToken.trim() === "")
+    ) {
+      res.status(401).json({
+        error: "Missing x-access-token header",
+        message: "Please include 'x-access-token' header in your request",
+      });
+      return;
+    }
+
+    // 2. Get user information
+    const userInfo = await getCurrentUser(finalAccessToken);
+    if (!userInfo) {
+      console.error("[Usage] Failed to get user info");
+      res.status(401).json({ error: "Failed to authenticate user" });
+      return;
+    }
+
+    const { userId } = userInfo;
+    console.log(`[Usage] User authenticated: ${userId}`);
+
+    // 3. Get user usage count
+    const usedCount = await getUserUsageCount(userId);
+
+    // 4. Calculate remaining count
+    const remainingCount = Math.max(0, FREE_USAGE_LIMIT - usedCount);
+
+    // 5. Return result
+    res.json({
+      success: true,
+      data: {
+        totalFreeCount: FREE_USAGE_LIMIT,
+        usedCount: usedCount,
+        remainingCount: remainingCount,
+      },
+    });
+  } catch (error) {
+    console.error("[Usage] Error:", error);
+    res.status(500).json({
+      error: "Internal server error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 });
 
 /**
@@ -303,10 +371,10 @@ async function verifyPayment(
 }
 
 /**
- * 通过 token 获取当前用户信息
+ * Get current user information by token
  *
- * @param token - 访问令牌
- * @returns Promise<{ userId: string } | null> - 用户信息或 null
+ * @param token - Access token
+ * @returns Promise<{ userId: string } | null> - User information or null
  */
 async function getCurrentUser(token: string): Promise<{ userId: string } | null> {
   if (!apiBaseUrl) {
@@ -332,8 +400,8 @@ async function getCurrentUser(token: string): Promise<{ userId: string } | null>
     const userData = await response.json();
     console.log("[User] User data received:", userData);
 
-    // 假设返回的数据结构包含 userId 字段
-    // 根据实际 API 响应结构调整
+    // Assume the response data structure contains userId field
+    // Adjust according to actual API response structure
     const userId = userData.result.id;
     if (!userId) {
       console.error("[User] User ID not found in response");
@@ -350,14 +418,14 @@ async function getCurrentUser(token: string): Promise<{ userId: string } | null>
 }
 
 /**
- * 获取用户使用次数
+ * Get user usage count
  *
- * @param userId - 用户 ID
- * @returns Promise<number> - 当前使用次数
+ * @param userId - User ID
+ * @returns Promise<number> - Current usage count
  */
 async function getUserUsageCount(userId: string): Promise<number> {
   try {
-    // 检查 Redis 连接状态
+    // Check Redis connection status
     if (redis.status !== "ready") {
       console.warn(`[Usage] Redis not ready (status: ${redis.status}), returning 0`);
       return 0;
@@ -367,20 +435,20 @@ async function getUserUsageCount(userId: string): Promise<number> {
     return count ? parseInt(count, 10) : 0;
   } catch (error) {
     console.error(`[Usage] Error getting usage count for user ${userId}:`, error);
-    // 如果 Redis 操作失败，返回 0 以允许请求继续
+    // If Redis operation fails, return 0 to allow request to continue
     return 0;
   }
 }
 
 /**
- * 增加用户使用次数
+ * Increment user usage count
  *
- * @param userId - 用户 ID
+ * @param userId - User ID
  * @returns Promise<void>
  */
 async function incrementUserUsage(userId: string): Promise<void> {
   try {
-    // 检查 Redis 连接状态
+    // Check Redis connection status
     if (redis.status !== "ready") {
       console.warn(`[Usage] Redis not ready (status: ${redis.status}), skipping usage increment`);
       return;
@@ -388,7 +456,7 @@ async function incrementUserUsage(userId: string): Promise<void> {
     const key = `${USER_USAGE_KEY_PREFIX}${userId}`;
     const count = await redis.incr(key);
 
-    // 设置过期时间为30天（可选，根据业务需求调整）
+    // Set expiration time to 30 days (optional, adjust according to business requirements)
     if (count === 1) {
       await redis.expire(key, 30 * 24 * 60 * 60);
     }
@@ -396,8 +464,8 @@ async function incrementUserUsage(userId: string): Promise<void> {
     console.log(`[Usage] User ${userId} usage count: ${count}`);
   } catch (error) {
     console.error(`[Usage] Error incrementing usage for user ${userId}:`, error);
-    // 不抛出错误，允许请求继续处理，即使 Redis 操作失败
-    // 在生产环境中，您可能需要根据业务需求决定是否抛出错误
+    // Don't throw error, allow request to continue processing even if Redis operation fails
+    // In production environment, you may need to decide whether to throw error based on business requirements
   }
 }
 
@@ -822,18 +890,18 @@ async function handleGenerate(req: express.Request, res: express.Response) {
   );
   res.setHeader("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
 
-  // OPTIONS 预检请求不需要 token，直接返回成功
+  // OPTIONS preflight request doesn't need token, return success directly
   if (req.method === "OPTIONS") {
     res.status(200).end();
     return;
   }
 
-  // 1. 从请求头获取 x-access-token
-  // Express 会将请求头转换为小写，所以使用小写键名
+  // 1. Get x-access-token from request headers
+  // Express converts headers to lowercase, so use lowercase key name
   const accessTokenRaw = req.header("x-access-token") || req.headers["x-access-token"];
   const finalAccessToken = Array.isArray(accessTokenRaw) ? accessTokenRaw[0] : accessTokenRaw;
 
-  // 添加调试日志（仅在缺少 token 时输出）
+  // Add debug logs (only output when token is missing)
   if (
     !finalAccessToken ||
     (typeof finalAccessToken === "string" && finalAccessToken.trim() === "")
@@ -854,7 +922,7 @@ async function handleGenerate(req: express.Request, res: express.Response) {
     return;
   }
 
-  // 2. 调用 /sys/getCurrUser 获取用户信息
+  // 2. Call /sys/getCurrUser to get user information
   const userInfo = await getCurrentUser(finalAccessToken);
   if (!userInfo) {
     console.error("[Generate] Failed to get user info");
@@ -865,7 +933,7 @@ async function handleGenerate(req: express.Request, res: express.Response) {
   const { userId } = userInfo;
   console.log(`[Generate] User authenticated: ${userId}`);
 
-  // 3. 检查用户使用次数
+  // 3. Check user usage count
   const usageCount = await getUserUsageCount(userId);
   const requiresPayment = usageCount >= FREE_USAGE_LIMIT;
 
@@ -873,7 +941,7 @@ async function handleGenerate(req: express.Request, res: express.Response) {
     `[Generate] User ${userId} usage: ${usageCount}/${FREE_USAGE_LIMIT}, requiresPayment: ${requiresPayment}`,
   );
 
-  // 4. 如果超过免费次数，需要 x402 支付
+  // 4. If free usage limit exceeded, require x402 payment
   if (requiresPayment) {
     const resource = `${req.protocol}://${req.headers.host}${req.originalUrl}` as Resource;
     const paymentRequirements = [
@@ -907,7 +975,7 @@ async function handleGenerate(req: express.Request, res: express.Response) {
     }
   }
 
-  // 5. 增加用户使用次数
+  // 5. Increment user usage count
   await incrementUserUsage(userId);
 
   // 6. For GET requests, convert query parameters to body
@@ -966,6 +1034,8 @@ app.listen(4021, () => {
   console.log(`CORS enabled for all origins`);
   console.log(`Proxy target URL: ${proxyTargetUrl}`);
   console.log(`Available endpoints:`);
+  console.log(`  GET /health`);
+  console.log(`  GET /usage (Get user free inference usage)`);
   console.log(`  GET /dynamic-price`);
   console.log(`  GET /delayed-settlement`);
   console.log(`  GET /multiple-payment-requirements`);
